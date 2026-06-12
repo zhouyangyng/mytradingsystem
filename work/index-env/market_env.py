@@ -27,6 +27,7 @@ WORK_DATA = ROOT / "data"
 OUTPUTS = ROOT.parents[1] / "outputs"
 RAW_JSON = WORK_DATA / "index_000985.json"
 STATES_CSV = WORK_DATA / "states.csv"
+MARKET_STRUCTURE_JSON = WORK_DATA / "market_structure.json"
 REPORT_HTML = OUTPUTS / "index_env_report.html"
 INDEX_HTML = OUTPUTS / "index.html"
 
@@ -39,6 +40,10 @@ STATE_COLORS = {
     "转": "#f59e0b",
     "空": "#16a34a",
 }
+ALL_A_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+INDUSTRY_FS = "m:90+t:2"
+CONCEPT_FS = "m:90+t:3"
+EMOTION_KEYWORDS = ("昨日", "打板", "连板", "涨停", "首板", "二板")
 
 
 def today_text() -> str:
@@ -53,8 +58,25 @@ def to_float(value: str | float | int) -> float:
     return float(value)
 
 
+def safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value in (None, "", "-"):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def fmt_num(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}f}"
+
+
+def fmt_amount(value: float) -> str:
+    if abs(value) >= 100_000_000:
+        return f"{value / 100_000_000:.2f}亿"
+    if abs(value) >= 10_000:
+        return f"{value / 10_000:.2f}万"
+    return f"{value:.0f}"
 
 
 def moving_average(values: list[float], end_index: int, window: int) -> float | None:
@@ -248,6 +270,198 @@ def fetch_ths_average_price_kline(begin: str, end: str) -> list[dict]:
 
 def fetch_kline(begin: str, end: str) -> list[dict]:
     return fetch_tencent_kline(SYMBOL, begin, end)
+
+
+def eastmoney_clist(fs: str, fields: str, page_size: int = 100, sort_field: str = "f3") -> list[dict]:
+    page_size = max(1, min(page_size, 100))
+    rows: list[dict] = []
+    total = None
+    page = 1
+    while total is None or len(rows) < total:
+        url = (
+            "https://push2.eastmoney.com/api/qt/clist/get?"
+            f"pn={page}&pz={page_size}&po=1&np=1&fltt=2&invt=2&fid={sort_field}"
+            f"&fs={fs}&fields={fields}"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://quote.eastmoney.com/",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if payload.get("rc") != 0:
+            raise RuntimeError(f"Eastmoney API error: {payload!r}")
+        data = payload.get("data", {}) or {}
+        diff = data.get("diff") or []
+        if total is None:
+            total = int(data.get("total") or len(diff))
+        if not diff:
+            break
+        rows.extend(diff)
+        if len(diff) < page_size:
+            break
+        page += 1
+    return rows[: total or len(rows)]
+
+
+def limit_threshold(code: str) -> float:
+    if code.startswith(("30", "68")):
+        return 19.8
+    if code.startswith(("4", "8")):
+        return 29.8
+    return 9.8
+
+
+def is_limit_up(item: dict) -> bool:
+    pct = item.get("f3")
+    code = str(item.get("f12", ""))
+    return isinstance(pct, (int, float)) and pct >= limit_threshold(code)
+
+
+def is_limit_down(item: dict) -> bool:
+    pct = item.get("f3")
+    code = str(item.get("f12", ""))
+    return isinstance(pct, (int, float)) and pct <= -limit_threshold(code)
+
+
+def sector_signal(items: list[dict]) -> list[dict]:
+    output = []
+    for item in items:
+        name = str(item.get("f14") or "")
+        if not name:
+            continue
+        output.append(
+            {
+                "code": str(item.get("f12") or ""),
+                "name": name,
+                "pct": safe_float(item.get("f3")),
+                "amount": safe_float(item.get("f6")),
+                "net": safe_float(item.get("f62")),
+            }
+        )
+    return output
+
+
+def non_emotion_sectors(items: list[dict]) -> list[dict]:
+    return [
+        item
+        for item in items
+        if not any(keyword in item["name"] for keyword in EMOTION_KEYWORDS)
+    ]
+
+
+def load_market_structures() -> list[dict]:
+    if not MARKET_STRUCTURE_JSON.exists():
+        return []
+    return json.loads(MARKET_STRUCTURE_JSON.read_text(encoding="utf-8"))
+
+
+def save_market_structures(rows: list[dict]) -> None:
+    WORK_DATA.mkdir(parents=True, exist_ok=True)
+    MARKET_STRUCTURE_JSON.write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
+    breadth = snapshot["breadth"]
+    sectors = non_emotion_sectors(snapshot["top_industries"][:8] + snapshot["top_concepts"][:8])
+    sector_names = [item["name"] for item in sectors[:8]]
+    prev_names = {
+        name
+        for item in history[-2:]
+        for name in item.get("mainline", {}).get("sector_names", [])
+    }
+    overlap = len(set(sector_names[:5]) & prev_names)
+    top_pct = sectors[0]["pct"] if sectors else 0
+    avg_top3 = sum(item["pct"] for item in sectors[:3]) / max(1, min(3, len(sectors)))
+    has_mainline = top_pct >= 3.5 and (avg_top3 >= 2.5 or overlap >= 2)
+
+    emotion_boards = [
+        item for item in snapshot["top_concepts"][:10] if any(keyword in item["name"] for keyword in EMOTION_KEYWORDS)
+    ]
+    emotion_active = breadth["limit_up"] >= 50 or any(item["pct"] >= 3 for item in emotion_boards)
+
+    if has_mainline:
+        status = "有主线"
+        note = f"强势方向集中在 {', '.join(sector_names[:3])}"
+    elif emotion_active:
+        status = "妖股情绪"
+        note = "主线不清晰，但涨停/连板情绪活跃"
+    else:
+        status = "无主线"
+        note = "强势方向持续性不足，适合降低预期"
+
+    return {
+        "status": status,
+        "has_mainline": has_mainline,
+        "emotion_active": emotion_active,
+        "sector_names": sector_names[:8],
+        "overlap_3d": overlap,
+        "top_pct": top_pct,
+        "avg_top3_pct": avg_top3,
+        "note": note,
+    }
+
+
+def fetch_market_structure(trade_date: str) -> dict:
+    stocks = eastmoney_clist(ALL_A_FS, "f12,f14,f3,f6,f2", page_size=6000)
+    industries = sector_signal(eastmoney_clist(INDUSTRY_FS, "f12,f14,f3,f6,f62", page_size=30))
+    concepts = sector_signal(eastmoney_clist(CONCEPT_FS, "f12,f14,f3,f6,f62", page_size=30))
+
+    valid = [item for item in stocks if isinstance(item.get("f3"), (int, float))]
+    up = sum(item["f3"] > 0 for item in valid)
+    down = sum(item["f3"] < 0 for item in valid)
+    flat = len(valid) - up - down
+    limit_up = sum(is_limit_up(item) for item in valid)
+    limit_down = sum(is_limit_down(item) for item in valid)
+    big_drop = sum(item["f3"] <= -7 for item in valid)
+    amount = sum(safe_float(item.get("f6")) for item in valid)
+    up_ratio = up / len(valid) * 100 if valid else 0
+
+    snapshot = {
+        "date": trade_date,
+        "breadth": {
+            "total": len(valid),
+            "up": up,
+            "down": down,
+            "flat": flat,
+            "up_ratio": up_ratio,
+            "limit_up": limit_up,
+            "limit_down": limit_down,
+            "big_drop": big_drop,
+            "amount": amount,
+        },
+        "top_industries": industries[:10],
+        "top_concepts": concepts[:10],
+    }
+    history = [item for item in load_market_structures() if item.get("date") != trade_date]
+    snapshot["mainline"] = assess_market_structure(snapshot, history)
+    return snapshot
+
+
+def update_market_structure(trade_date: str) -> dict | None:
+    try:
+        snapshot = fetch_market_structure(trade_date)
+    except Exception as exc:
+        print(f"市场结构数据暂时不可用: {exc}", file=sys.stderr)
+        return None
+    rows = [item for item in load_market_structures() if item.get("date") != trade_date]
+    rows.append(snapshot)
+    rows.sort(key=lambda item: item["date"])
+    save_market_structures(rows)
+    return snapshot
+
+
+def attach_market_structure(rows: list[dict]) -> list[dict]:
+    by_date = {item["date"]: item for item in load_market_structures()}
+    for row in rows:
+        row["market"] = by_date.get(row["date"])
+    return rows
 
 
 def load_raw_rows() -> list[dict]:
@@ -447,12 +661,25 @@ def phase_for(states: list[dict], index: int) -> str:
 
 
 def position_advice(row: dict) -> str:
+    market = row.get("market")
+    mainline = market.get("mainline", {}) if market else {}
+    has_mainline = bool(mainline.get("has_mainline"))
+    emotion_active = bool(mainline.get("emotion_active"))
+
+    if row["state"] == "空":
+        return "0%-20%，指数主跌/防守，不适合重仓"
+    if row["phase"] == "主升" and has_mainline:
+        return "70%-90%，指数主升且有主线，可重仓主线"
     if row["phase"] == "主升":
-        return "60%-80%"
+        return "60%-80%，指数主升但主线确认不足"
+    if row["state"] in ("多", "转") and has_mainline:
+        return "40%-60%，指数震荡/试攻，有主线可参与主线"
+    if row["state"] in ("多", "转") and emotion_active:
+        return "10%-30%，无清晰主线但情绪活跃，只适合小仓"
     if row["state"] == "多":
-        return "40%-60%"
+        return "30%-50%，指数偏强但缺少主线确认"
     if row["state"] == "转":
-        return "20%-40%"
+        return "0%-20%，指数震荡且无主线，低仓位观察"
     return "0%-20%，不适合重仓"
 
 
@@ -482,7 +709,7 @@ def load_states() -> list[dict]:
     if raw_rows:
         rows = calculate_states(raw_rows)
         save_states_csv(rows)
-        return rows
+        return attach_market_structure(rows)
     if not STATES_CSV.exists():
         return []
     with STATES_CSV.open(newline="", encoding="utf-8") as handle:
@@ -491,7 +718,7 @@ def load_states() -> list[dict]:
         for key in ("open", "high", "low", "close", "volume"):
             row[key] = float(row[key])
         row["score"] = int(row["score"])
-    return rows
+    return attach_market_structure(rows)
 
 
 def update_data(begin: str = DEFAULT_BEGIN, end: str | None = None) -> list[dict]:
@@ -507,6 +734,8 @@ def update_data(begin: str = DEFAULT_BEGIN, end: str | None = None) -> list[dict
         raise RuntimeError("No K-line data fetched.")
     save_raw_rows(merged)
     states = calculate_states(merged)
+    update_market_structure(states[-1]["date"])
+    attach_market_structure(states)
     save_states_csv(states)
     return states
 
@@ -530,6 +759,23 @@ def print_today(rows: list[dict]) -> None:
         f"涨跌 {fmt_num(row.get('pct_change', 0.0))}%"
     )
     print(f"最近5日: {recent_text}")
+    market = row.get("market")
+    if market:
+        breadth = market["breadth"]
+        mainline = market["mainline"]
+        print(
+            "市场宽度: "
+            f"上涨 {breadth['up']} / 下跌 {breadth['down']} / "
+            f"上涨比例 {fmt_num(breadth['up_ratio'])}% / "
+            f"涨停 {breadth['limit_up']} / 跌停 {breadth['limit_down']} / "
+            f"大跌股 {breadth['big_drop']}"
+        )
+        print(f"市场成交额: {fmt_amount(breadth['amount'])}")
+        print(f"主线判断: {mainline['status']}，{mainline['note']}")
+        if mainline.get("sector_names"):
+            print(f"强势方向: {' / '.join(mainline['sector_names'][:5])}")
+    else:
+        print("市场结构: 暂无当日涨跌家数/主线数据")
     print("触发原因:")
     for reason in str(row["reasons"]).split("；"):
         print(f"- {reason}")
@@ -549,10 +795,12 @@ def json_for_chart(rows: list[dict]) -> str:
                 "s": row["state"],
                 "score": row["score"],
                 "phase": row["phase"],
+                "pct": row.get("pct_change", 0.0),
                 "ma5": row.get("ma5"),
                 "ma10": row.get("ma10"),
                 "ma20": row.get("ma20"),
                 "reasons": row["reasons"],
+                "market": row.get("market"),
             }
         )
     return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
@@ -774,12 +1022,44 @@ def render_html(rows: list[dict]) -> Path:
       font-size: 15px;
       margin: 0 0 10px;
     }}
+    .detail-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+    .detail-item {{
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 8px;
+      background: #fbfcff;
+      min-height: 58px;
+    }}
+    .detail-item span {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .detail-item b {{
+      display: block;
+      font-size: 16px;
+      line-height: 1.25;
+    }}
     .reasons {{
       margin: 0;
       padding-left: 18px;
       color: #344054;
       line-height: 1.7;
       font-size: 14px;
+    }}
+    .market-note {{
+      border-top: 1px solid var(--line);
+      margin-top: 10px;
+      padding-top: 10px;
+      color: #344054;
+      font-size: 14px;
+      line-height: 1.7;
     }}
     .history {{
       display: grid;
@@ -814,6 +1094,7 @@ def render_html(rows: list[dict]) -> Path:
       .zoom {{ width: 100%; }}
       .zoom button {{ flex: 1; }}
       .details {{ grid-template-columns: 1fr; }}
+      .detail-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       canvas {{ height: 68vh; min-height: 460px; }}
       .history {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     }}
@@ -861,16 +1142,18 @@ def render_html(rows: list[dict]) -> Path:
         <span><i class="dot" style="background:var(--blue)"></i>MA5/10</span>
         <span><i class="dot" style="background:var(--purple)"></i>MA20</span>
       </div>
-      <div id="tip">拖动查看历史，双击回到最新</div>
+      <div id="tip">拖动查看历史，双击K线查看某日评分</div>
     </div>
     <canvas id="chart" aria-label="指数K线图"></canvas>
   </section>
   <section class="details">
     <div class="panel">
-      <h2>今日触发原因</h2>
-      <ul class="reasons">
+      <h2 id="detailTitle">今日择时评分明细</h2>
+      <div class="detail-grid" id="detailGrid"></div>
+      <ul class="reasons" id="detailReasons">
         {"".join(f"<li>{html.escape(item)}</li>" for item in str(latest["reasons"]).split("；"))}
       </ul>
+      <div class="market-note" id="marketNote"></div>
     </div>
     <div class="panel">
       <h2>最近5日</h2>
@@ -885,15 +1168,104 @@ const rows = {data_json};
 const colors = {{"多":"#ef4444","转":"#f59e0b","空":"#16a34a"}};
 const canvas = document.getElementById("chart");
 const tip = document.getElementById("tip");
+const detailTitle = document.getElementById("detailTitle");
+const detailGrid = document.getElementById("detailGrid");
+const detailReasons = document.getElementById("detailReasons");
+const marketNote = document.getElementById("marketNote");
 const ctx = canvas.getContext("2d");
 let end = rows.length - 1;
 let visible = Math.min(rows.length, window.innerWidth < 760 ? 80 : 120);
 let dragging = false;
 let lastX = 0;
 let activeRange = "120";
+let selectedIndex = rows.length - 1;
 let pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartVisible = visible;
+
+function fmt(value, digits = 2) {{
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return Number(value).toFixed(digits);
+}}
+
+function fmtAmount(value) {{
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const n = Number(value);
+  if (Math.abs(n) >= 100000000) return `${{(n / 100000000).toFixed(2)}}亿`;
+  if (Math.abs(n) >= 10000) return `${{(n / 10000).toFixed(2)}}万`;
+  return n.toFixed(0);
+}}
+
+function positionAdvice(row) {{
+  const mainline = row.market && row.market.mainline ? row.market.mainline : {{}};
+  const hasMainline = Boolean(mainline.has_mainline);
+  const emotionActive = Boolean(mainline.emotion_active);
+  if (row.s === "空") return "0%-20%，指数主跌/防守，不适合重仓";
+  if (row.phase === "主升" && hasMainline) return "70%-90%，指数主升且有主线，可重仓主线";
+  if (row.phase === "主升") return "60%-80%，指数主升但主线确认不足";
+  if ((row.s === "多" || row.s === "转") && hasMainline) return "40%-60%，指数震荡/试攻，有主线可参与主线";
+  if ((row.s === "多" || row.s === "转") && emotionActive) return "10%-30%，无清晰主线但情绪活跃，只适合小仓";
+  if (row.s === "多") return "30%-50%，指数偏强但缺少主线确认";
+  if (row.s === "转") return "0%-20%，指数震荡且无主线，低仓位观察";
+  return "0%-20%，不适合重仓";
+}}
+
+function escapeHtml(value) {{
+  return String(value).replace(/[&<>"']/g, ch => ({{
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }}[ch]));
+}}
+
+function updateDetail(index) {{
+  selectedIndex = Math.max(0, Math.min(rows.length - 1, index));
+  const row = rows[selectedIndex];
+  const market = row.market;
+  const breadth = market ? market.breadth : null;
+  const mainline = market ? market.mainline : null;
+  detailTitle.textContent = `${{row.d}} 择时评分明细`;
+  const items = [
+    ["状态", row.s],
+    ["分数", `${{row.score}}分`],
+    ["阶段", row.phase],
+    ["仓位建议", positionAdvice(row)],
+    ["开盘", fmt(row.o)],
+    ["最高", fmt(row.h)],
+    ["最低", fmt(row.l)],
+    ["收盘", fmt(row.c)],
+    ["涨跌幅", `${{fmt(row.pct)}}%`],
+    ["成交量", fmt(row.v, 0)],
+    ["MA5", fmt(row.ma5)],
+    ["MA20", fmt(row.ma20)],
+    ["上涨比例", breadth ? `${{fmt(breadth.up_ratio)}}%` : "-"],
+    ["涨停/跌停", breadth ? `${{breadth.limit_up}} / ${{breadth.limit_down}}` : "-"],
+    ["大跌股", breadth ? breadth.big_drop : "-"],
+    ["全市场成交额", breadth ? fmtAmount(breadth.amount) : "-"],
+    ["主线状态", mainline ? mainline.status : "-"],
+    ["主线连续性", mainline ? `${{mainline.overlap_3d}}个重合方向` : "-"]
+  ];
+  detailGrid.innerHTML = items.map(([label, value]) =>
+    `<div class="detail-item"><span>${{escapeHtml(label)}}</span><b>${{escapeHtml(value)}}</b></div>`
+  ).join("");
+  detailReasons.innerHTML = String(row.reasons || "样本不足，默认观察")
+    .split("；")
+    .map(item => `<li>${{escapeHtml(item)}}</li>`)
+    .join("");
+  if (market && mainline) {{
+    const sectors = mainline.sector_names && mainline.sector_names.length
+      ? mainline.sector_names.slice(0, 6).join(" / ")
+      : "暂无";
+    marketNote.innerHTML =
+      `<b>市场结构：</b>${{escapeHtml(mainline.note)}}<br>` +
+      `<b>强势方向：</b>${{escapeHtml(sectors)}}`;
+  }} else {{
+    marketNote.innerHTML = "<b>市场结构：</b>暂无当日涨跌家数/主线数据";
+  }}
+  tip.textContent = `${{row.d}}  状态:${{row.s}}  分数:${{row.score}}  收盘:${{fmt(row.c)}}`;
+}}
 
 function resize() {{
   const rect = canvas.getBoundingClientRect();
@@ -947,6 +1319,7 @@ function draw() {{
   const step = (w - pad.l - pad.r) / slice.length;
   const candleW = Math.max(2, Math.min(12, step * 0.58));
   const drawEveryLabel = step >= 7 ? 1 : Math.ceil(7 / step);
+  const selectedVisibleIndex = selectedIndex >= start && selectedIndex <= end ? selectedIndex - start : -1;
 
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
@@ -962,6 +1335,19 @@ function draw() {{
     ctx.stroke();
     const value = max - (max - min) / 4 * i;
     ctx.fillText(value.toFixed(0), 4, y + 4);
+  }}
+
+  if (selectedVisibleIndex >= 0) {{
+    const selectedX = pad.l + selectedVisibleIndex * step + step / 2;
+    ctx.fillStyle = "rgba(37, 99, 235, .08)";
+    ctx.fillRect(Math.max(pad.l, selectedX - step / 2), pad.t, Math.min(step, w - pad.r - pad.l), chartH);
+    ctx.strokeStyle = "rgba(37, 99, 235, .55)";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(selectedX, pad.t);
+    ctx.lineTo(selectedX, pad.t + chartH);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }}
 
   slice.forEach((r, i) => {{
@@ -1008,6 +1394,13 @@ function draw() {{
       ctx.fillText(r.s, x, labelY + labelH - 5);
       ctx.textAlign = "left";
     }}
+
+    if (start + i === selectedIndex) {{
+      ctx.strokeStyle = "#1d4ed8";
+      ctx.lineWidth = 2;
+      roundRect(ctx, x - candleW / 2 - 3, bodyTop - 3, candleW + 6, bodyH + 6, 4);
+      ctx.stroke();
+    }}
   }});
 
   drawLine(rows, "ma5", start, slice.length, min, max, pad.l, pad.t, w - pad.l - pad.r, chartH, "#2563eb");
@@ -1021,8 +1414,21 @@ function draw() {{
     const last = slice[slice.length - 1];
     const lastText = last.d;
     ctx.fillText(lastText, w - pad.r - ctx.measureText(lastText).width, h - 8);
-    tip.textContent = `${{last.d}}  状态:${{last.s}}  分数:${{last.score}}  收盘:${{last.c.toFixed(2)}}`;
+    const selected = rows[selectedIndex] || last;
+    tip.textContent = `${{selected.d}}  状态:${{selected.s}}  分数:${{selected.score}}  收盘:${{fmt(selected.c)}}`;
   }}
+}}
+
+function indexFromClientX(clientX) {{
+  const rect = canvas.getBoundingClientRect();
+  const pad = {{l: 44, r: 12}};
+  const start = Math.max(0, end - visible + 1);
+  const sliceLength = end - start + 1;
+  const chartWidth = rect.width - pad.l - pad.r;
+  if (sliceLength <= 0 || chartWidth <= 0) return selectedIndex;
+  const x = Math.max(pad.l, Math.min(rect.width - pad.r, clientX - rect.left));
+  const offset = Math.floor((x - pad.l) / (chartWidth / sliceLength));
+  return Math.max(start, Math.min(end, start + offset));
 }}
 
 function setRange(value) {{
@@ -1033,9 +1439,11 @@ function setRange(value) {{
     visible = Math.min(rows.length, Number(value));
   }}
   end = rows.length - 1;
+  selectedIndex = rows.length - 1;
   document.querySelectorAll(".range button").forEach(btn => {{
     btn.classList.toggle("active", btn.dataset.range === value);
   }});
+  updateDetail(selectedIndex);
   draw();
 }}
 
@@ -1104,13 +1512,17 @@ canvas.addEventListener("wheel", e => {{
   const anchor = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
   zoom(e.deltaY < 0 ? 0.82 : 1.22, anchor);
 }}, {{passive: false}});
-canvas.addEventListener("dblclick", () => {{ end = rows.length - 1; draw(); }});
+canvas.addEventListener("dblclick", e => {{
+  updateDetail(indexFromClientX(e.clientX));
+  draw();
+}});
 document.getElementById("zoomIn").addEventListener("click", () => zoom(0.75, 0.5));
 document.getElementById("zoomOut").addEventListener("click", () => zoom(1.35, 0.5));
 document.querySelectorAll(".range button").forEach(btn => {{
   btn.addEventListener("click", () => setRange(btn.dataset.range));
 }});
 window.addEventListener("resize", resize);
+updateDetail(selectedIndex);
 resize();
 </script>
 </body>
@@ -1162,6 +1574,7 @@ def command_render(_: argparse.Namespace) -> int:
     if not rows:
         raise RuntimeError("没有可用的中证全指数据，请先运行 update。")
     if rows:
+        attach_market_structure(rows)
         save_states_csv(rows)
     path = render_html(rows)
     print(f"已生成网页: {path}")
@@ -1187,6 +1600,7 @@ def command_import_csv(args: argparse.Namespace) -> int:
     rows = import_csv_rows(Path(args.path))
     save_raw_rows(rows)
     states = calculate_states(rows)
+    attach_market_structure(states)
     save_states_csv(states)
     path = render_html(states)
     print(f"已导入 {len(rows)} 个交易日的{INDEX_NAME}K线。")

@@ -19,8 +19,19 @@ python3 work/index-env/market_env.py all
 
 - 数据缓存：`work/index-env/data/index_000985.json`
 - 状态历史：`work/index-env/data/states.csv`
+- 市场结构快照：`work/index-env/data/market_structure.json`
 - 网页报告：`outputs/index_env_report.html`
 - 默认首页：`outputs/index.html`
+
+系统会在指数K线评分之外，自动抓取当日市场结构：
+
+- 涨跌家数 / 上涨比例
+- 涨停 / 跌停 / 大跌股数量
+- 行业与概念强度
+- 主线板块持续性
+- 妖股/情绪行情识别
+
+网页中双击某日K线，可以查看当天的指数评分明细和市场结构快照。
 
 只看命令行日报：
 
