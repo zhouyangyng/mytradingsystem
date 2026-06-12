@@ -1,6 +1,8 @@
 name: Deploy Index Environment
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # 18:10 China time, after A-share close and data refresh.
