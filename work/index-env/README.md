@@ -2,6 +2,13 @@
 
 主判指数：中证全指 `sh000985`。
 
+## 项目上下文
+
+旧对话内容已整理到：
+
+- [项目上下文与决策记录](/Users/zhouyang24/Documents/Codex/多空系统建设/docs/project-context.md)
+- [旧对话归档](/Users/zhouyang24/Documents/Codex/多空系统建设/docs/conversation-archive.md)
+
 ## 常用命令
 
 ```bash
