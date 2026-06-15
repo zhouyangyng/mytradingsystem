@@ -33,6 +33,13 @@ python3 work/index-env/market_env.py all
 
 网页中双击某日K线，可以查看当天的指数评分明细和市场结构快照。
 
+系统还会生成综合确认层：
+
+- 稳定主判：中证全指
+- 风格确认：沪深300 / 中证1000 / 国证2000
+- 体感确认：平均股价或等权类 CSV，导入后参与判断
+- 综合结论：判断指数信号是否被体感与风格确认
+
 交易时间内运行时，系统会额外拉取盘中实时行情：
 
 - 用实时开高低现价生成当天临时K线。
@@ -56,6 +63,12 @@ python3 work/index-env/market_env.py render
 
 ```bash
 python3 work/index-env/market_env.py import-csv /path/to/index.csv
+```
+
+导入平均股价/等权体感指数 CSV：
+
+```bash
+python3 work/index-env/market_env.py import-sense-csv /path/to/average_price.csv
 ```
 
 CSV 支持这些列名：

@@ -29,12 +29,15 @@ OUTPUTS = ROOT.parents[1] / "outputs"
 RAW_JSON = WORK_DATA / "index_000985.json"
 STATES_CSV = WORK_DATA / "states.csv"
 MARKET_STRUCTURE_JSON = WORK_DATA / "market_structure.json"
+SENSE_INDEX_JSON = WORK_DATA / "sense_average_price.json"
+CONFIRMATION_JSON = WORK_DATA / "confirmation_indices.json"
 REPORT_HTML = OUTPUTS / "index_env_report.html"
 INDEX_HTML = OUTPUTS / "index.html"
 
 SYMBOL = "sh000985"
 INDEX_NAME = "中证全指"
 INDEX_CODE = "sh000985"
+SENSE_INDEX_NAME = "平均股价/体感指数"
 DEFAULT_BEGIN = "2025-01-01"
 STATE_COLORS = {
     "多": "#ef4444",
@@ -51,6 +54,11 @@ REQUEST_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "Connection": "close",
 }
+CONFIRM_INDICES = [
+    {"symbol": "sh000300", "name": "沪深300", "role": "权重风格"},
+    {"symbol": "sh000852", "name": "中证1000", "role": "中小盘"},
+    {"symbol": "sz399303", "name": "国证2000", "role": "小票题材"},
+]
 
 
 def today_text() -> str:
@@ -698,6 +706,34 @@ def save_raw_rows(rows: list[dict]) -> None:
     )
 
 
+def load_sense_rows() -> list[dict]:
+    if not SENSE_INDEX_JSON.exists():
+        return []
+    return json.loads(SENSE_INDEX_JSON.read_text(encoding="utf-8"))
+
+
+def save_sense_rows(rows: list[dict]) -> None:
+    WORK_DATA.mkdir(parents=True, exist_ok=True)
+    SENSE_INDEX_JSON.write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_confirmation_cache() -> dict:
+    if not CONFIRMATION_JSON.exists():
+        return {}
+    return json.loads(CONFIRMATION_JSON.read_text(encoding="utf-8"))
+
+
+def save_confirmation_cache(payload: dict) -> None:
+    WORK_DATA.mkdir(parents=True, exist_ok=True)
+    CONFIRMATION_JSON.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def import_csv_rows(path: Path) -> list[dict]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
@@ -880,6 +916,92 @@ def phase_for(states: list[dict], index: int) -> str:
     return "观察"
 
 
+def latest_state_summary(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+    state_rows = calculate_states(rows)
+    latest = state_rows[-1]
+    return {
+        "date": latest["date"],
+        "state": latest["state"],
+        "score": latest["score"],
+        "phase": latest["phase"],
+        "close": latest["close"],
+        "pct": latest.get("pct_change", 0.0),
+    }
+
+
+def update_confirmation_indices(begin: str = DEFAULT_BEGIN, end: str | None = None) -> dict:
+    end = end or today_text()
+    payload = {"updated_at": now_text(), "indices": []}
+    for item in CONFIRM_INDICES:
+        try:
+            rows = fetch_tencent_kline(item["symbol"], begin, end)
+            summary = latest_state_summary(rows)
+            if summary:
+                payload["indices"].append({**item, **summary})
+        except Exception as exc:
+            payload["indices"].append({**item, "error": str(exc)})
+    save_confirmation_cache(payload)
+    return payload
+
+
+def build_confirmation(main_row: dict) -> dict:
+    payload = load_confirmation_cache()
+    indices = payload.get("indices", [])
+    sense_summary = latest_state_summary(load_sense_rows())
+
+    small_caps = [
+        item
+        for item in indices
+        if item.get("name") in ("中证1000", "国证2000") and item.get("state")
+    ]
+    weight = next((item for item in indices if item.get("name") == "沪深300"), None)
+    small_bull = sum(1 for item in small_caps if item.get("state") == "多")
+    small_bear = sum(1 for item in small_caps if item.get("state") == "空")
+
+    if sense_summary:
+        sense_text = f"{SENSE_INDEX_NAME}{sense_summary['state']}（{sense_summary['score']}分）"
+    else:
+        sense_text = "暂无平均股价/体感指数数据"
+
+    if small_bull >= 2:
+        style_text = "中小盘/题材风格强"
+    elif small_bear >= 2:
+        style_text = "中小盘/题材风格弱"
+    elif weight and weight.get("state") == "多":
+        style_text = "权重风格相对强"
+    else:
+        style_text = "风格未共振"
+
+    confirm_score = 0
+    if sense_summary:
+        confirm_score += {"多": 2, "转": 1, "空": -2}.get(sense_summary["state"], 0)
+    for item in indices:
+        confirm_score += {"多": 1, "转": 0, "空": -1}.get(item.get("state"), 0)
+
+    if main_row["state"] == "多" and confirm_score >= 2:
+        conclusion = "综合偏多，指数与体感/风格确认度较高"
+    elif main_row["state"] == "多":
+        conclusion = "指数偏多但确认不足，仓位宜打折"
+    elif main_row["state"] == "转" and confirm_score >= 2:
+        conclusion = "指数震荡但体感/风格修复，可试主线"
+    elif main_row["state"] == "空":
+        conclusion = "指数仍在防守区，确认层只作为修复观察"
+    else:
+        conclusion = "综合震荡，等待方向确认"
+
+    return {
+        "updated_at": payload.get("updated_at"),
+        "sense": sense_summary,
+        "indices": indices,
+        "style": style_text,
+        "sense_text": sense_text,
+        "confirm_score": confirm_score,
+        "conclusion": conclusion,
+    }
+
+
 def position_advice(row: dict) -> str:
     market = row.get("market")
     mainline = market.get("mainline", {}) if market else {}
@@ -972,6 +1094,8 @@ def build_display_states(include_intraday: bool = True, refresh_market: bool = F
     attach_market_structure(states)
     if states and states[-1].get("intraday") and not states[-1].get("market"):
         states[-1]["market"] = fallback_intraday_market(states[-1])
+    if states:
+        states[-1]["confirmation"] = build_confirmation(states[-1])
     return states
 
 
@@ -1027,6 +1151,15 @@ def print_today(rows: list[dict]) -> None:
             print(f"强势方向: {' / '.join(mainline['sector_names'][:5])}")
     else:
         print("市场结构: 暂无当日涨跌家数/主线数据")
+    confirmation = row.get("confirmation") or build_confirmation(row)
+    print(f"体感确认: {confirmation['sense_text']}")
+    print(f"风格确认: {confirmation['style']}")
+    print(f"综合结论: {confirmation['conclusion']}")
+    for item in confirmation.get("indices", []):
+        if item.get("state"):
+            print(f"- {item['name']}({item['role']}): {item['state']} {item['score']}分")
+        elif item.get("error"):
+            print(f"- {item['name']}({item['role']}): 数据暂不可用")
     print("触发原因:")
     for reason in str(row["reasons"]).split("；"):
         print(f"- {reason}")
@@ -1057,6 +1190,7 @@ def json_for_chart(rows: list[dict]) -> str:
                 "ma20": row.get("ma20"),
                 "reasons": row["reasons"],
                 "market": row.get("market"),
+                "confirmation": row.get("confirmation"),
             }
         )
     return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
@@ -1357,6 +1491,23 @@ def render_html(rows: list[dict]) -> Path:
       font-size: 14px;
       line-height: 1.7;
     }}
+    .confirm-list {{
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }}
+    .confirm-row {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      background: #fbfcff;
+      font-size: 13px;
+    }}
+    .confirm-row b {{ font-size: 14px; }}
+    .confirm-row span {{ color: var(--muted); }}
     .history {{
       display: grid;
       grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -1453,6 +1604,11 @@ def render_html(rows: list[dict]) -> Path:
       <div class="market-note" id="marketNote"></div>
     </div>
     <div class="panel">
+      <h2>综合确认</h2>
+      <div class="market-note" id="confirmSummary"></div>
+      <div class="confirm-list" id="confirmList"></div>
+    </div>
+    <div class="panel">
       <h2>最近5日</h2>
       <div class="history">
         {"".join(render_history_card(row) for row in rows[-5:])}
@@ -1469,6 +1625,8 @@ const detailTitle = document.getElementById("detailTitle");
 const detailGrid = document.getElementById("detailGrid");
 const detailReasons = document.getElementById("detailReasons");
 const marketNote = document.getElementById("marketNote");
+const confirmSummary = document.getElementById("confirmSummary");
+const confirmList = document.getElementById("confirmList");
 const ctx = canvas.getContext("2d");
 let end = rows.length - 1;
 let visible = Math.min(rows.length, window.innerWidth < 760 ? 80 : 120);
@@ -1570,6 +1728,20 @@ function updateDetail(index) {{
         : "");
   }} else {{
     marketNote.innerHTML = "<b>市场结构：</b>暂无当日涨跌家数/主线数据";
+  }}
+  if (row.confirmation) {{
+    const c = row.confirmation;
+    confirmSummary.innerHTML =
+      `<b>体感确认：</b>${{escapeHtml(c.sense_text || "暂无")}}<br>` +
+      `<b>风格确认：</b>${{escapeHtml(c.style || "暂无")}}<br>` +
+      `<b>综合结论：</b>${{escapeHtml(c.conclusion || "暂无")}}`;
+    confirmList.innerHTML = (c.indices || []).map(item => {{
+      const value = item.state ? `${{item.state}} ${{item.score}}分` : "数据暂缺";
+      return `<div class="confirm-row"><span>${{escapeHtml(item.name)}} · ${{escapeHtml(item.role)}}</span><b>${{escapeHtml(value)}}</b></div>`;
+    }}).join("");
+  }} else {{
+    confirmSummary.innerHTML = "<b>综合确认：</b>仅最新交易日展示";
+    confirmList.innerHTML = "";
   }}
   tip.textContent = `${{row.d}}  状态:${{row.s}}  分数:${{row.score}}  收盘:${{fmt(row.c)}}`;
 }}
@@ -1891,6 +2063,7 @@ def local_ip() -> str:
 
 def command_update(args: argparse.Namespace) -> int:
     rows = update_data(begin=args.begin, end=args.end)
+    update_confirmation_indices(begin=args.begin, end=args.end)
     print(f"已更新 {len(rows)} 个交易日。最新日期: {rows[-1]['date']} {rows[-1]['state']} {rows[-1]['score']}分")
     return 0
 
@@ -1915,6 +2088,7 @@ def command_render(_: argparse.Namespace) -> int:
 
 def command_all(args: argparse.Namespace) -> int:
     update_data(begin=args.begin, end=args.end)
+    update_confirmation_indices(begin=args.begin, end=args.end)
     display_rows = build_display_states(include_intraday=True, refresh_market=True)
     print_today(display_rows)
     path = render_html(display_rows)
@@ -1923,6 +2097,19 @@ def command_all(args: argparse.Namespace) -> int:
     print(f"默认首页: {INDEX_HTML}")
     print(f"手机同一 Wi-Fi 访问: python3 -m http.server 8765 -d {OUTPUTS}")
     print(f"手机地址: http://{local_ip()}:8765/")
+    return 0
+
+
+def command_import_sense_csv(args: argparse.Namespace) -> int:
+    rows = import_csv_rows(Path(args.path))
+    save_sense_rows(rows)
+    summary = latest_state_summary(rows)
+    print(f"已导入 {len(rows)} 个交易日的{SENSE_INDEX_NAME}。")
+    if summary:
+        print(f"最新体感状态: {summary['date']} {summary['state']} {summary['score']}分")
+    display_rows = build_display_states(include_intraday=True, refresh_market=False)
+    path = render_html(display_rows)
+    print(f"网页: {path}")
     return 0
 
 
@@ -1982,6 +2169,10 @@ def build_parser() -> argparse.ArgumentParser:
     import_csv_cmd = sub.add_parser("import-csv", help="导入平均股价日线CSV并生成状态/网页")
     import_csv_cmd.add_argument("path", help="CSV路径，支持 date/open/high/low/close/volume 或 中文列名")
     import_csv_cmd.set_defaults(func=command_import_csv)
+
+    import_sense_cmd = sub.add_parser("import-sense-csv", help="导入平均股价/等权体感指数CSV，作为确认层")
+    import_sense_cmd.add_argument("path", help="CSV路径，支持 date/open/high/low/close/volume 或 中文列名")
+    import_sense_cmd.set_defaults(func=command_import_sense_csv)
 
     return parser
 
