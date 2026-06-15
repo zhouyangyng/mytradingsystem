@@ -17,6 +17,7 @@ import math
 import os
 import re
 import socket
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -44,14 +45,59 @@ ALL_A_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 INDUSTRY_FS = "m:90+t:2"
 CONCEPT_FS = "m:90+t:3"
 EMOTION_KEYWORDS = ("昨日", "打板", "连板", "涨停", "首板", "二板")
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://quote.eastmoney.com/",
+    "Accept": "application/json,text/plain,*/*",
+    "Connection": "close",
+}
 
 
 def today_text() -> str:
     return dt.date.today().strftime("%Y-%m-%d")
 
 
+def now_text() -> str:
+    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def parse_date(value: str) -> dt.date:
     return dt.datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def parse_quote_time(value: str) -> dt.datetime:
+    return dt.datetime.strptime(value, "%Y%m%d%H%M%S")
+
+
+def is_trading_intraday(moment: dt.datetime) -> bool:
+    if moment.weekday() >= 5:
+        return False
+    start = dt.time(9, 25)
+    end = dt.time(15, 5)
+    return start <= moment.time() < end
+
+
+def elapsed_trading_minutes(moment: dt.datetime) -> int:
+    sessions = (
+        (dt.time(9, 30), dt.time(11, 30)),
+        (dt.time(13, 0), dt.time(15, 0)),
+    )
+    elapsed = 0
+    day = moment.date()
+    for start_time, end_time in sessions:
+        start = dt.datetime.combine(day, start_time)
+        end = dt.datetime.combine(day, end_time)
+        if moment <= start:
+            continue
+        elapsed += int((min(moment, end) - start).total_seconds() // 60)
+    return max(0, min(240, elapsed))
+
+
+def project_full_day_amount(amount: float, moment: dt.datetime) -> tuple[float, int]:
+    elapsed = elapsed_trading_minutes(moment)
+    if elapsed <= 0:
+        return amount, elapsed
+    return amount * 240 / elapsed, elapsed
 
 
 def to_float(value: str | float | int) -> float:
@@ -129,6 +175,102 @@ def fetch_tencent_kline(symbol: str, begin: str, end: str) -> list[dict]:
         )
     rows.sort(key=lambda row: row["date"])
     return rows
+
+
+def fetch_tencent_realtime_row(symbol: str = SYMBOL) -> dict | None:
+    url = f"https://qt.gtimg.cn/q={symbol}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://gu.qq.com/",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        text = response.read().decode("gbk", errors="ignore")
+    match = re.search(r'"([^"]+)"', text)
+    if not match:
+        return None
+    fields = match.group(1).split("~")
+    if len(fields) < 37 or not fields[30]:
+        return None
+    quote_dt = parse_quote_time(fields[30])
+    current = safe_float(fields[3])
+    if current <= 0:
+        return None
+    amount = safe_float(fields[57]) * 10000
+    projected_amount, elapsed = project_full_day_amount(amount, quote_dt)
+    return {
+        "date": quote_dt.strftime("%Y-%m-%d"),
+        "open": safe_float(fields[5], current),
+        "high": safe_float(fields[33], current),
+        "low": safe_float(fields[34], current),
+        "close": current,
+        "volume": safe_float(fields[36]),
+        "amount": amount,
+        "amount_projected": projected_amount,
+        "elapsed_minutes": elapsed,
+        "quote_time": quote_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "is_intraday": is_trading_intraday(quote_dt),
+        "prev_close": safe_float(fields[4]),
+    }
+
+
+def fetch_eastmoney_realtime_row() -> dict | None:
+    url = (
+        "https://push2.eastmoney.com/api/qt/stock/get?"
+        "secid=1.000985&fields=f43,f44,f45,f46,f47,f48,f57,f58,f60,f86,f169,f170"
+    )
+    payload = eastmoney_json(url)
+    data = payload.get("data") or {}
+    if payload.get("rc") != 0 or not data:
+        return None
+    quote_dt = dt.datetime.fromtimestamp(int(data.get("f86") or 0))
+    current = safe_float(data.get("f43")) / 100
+    if current <= 0:
+        return None
+    amount = safe_float(data.get("f48"))
+    projected_amount, elapsed = project_full_day_amount(amount, quote_dt)
+    return {
+        "date": quote_dt.strftime("%Y-%m-%d"),
+        "open": safe_float(data.get("f46")) / 100,
+        "high": safe_float(data.get("f44")) / 100,
+        "low": safe_float(data.get("f45")) / 100,
+        "close": current,
+        "volume": safe_float(data.get("f47")),
+        "amount": amount,
+        "amount_projected": projected_amount,
+        "elapsed_minutes": elapsed,
+        "quote_time": quote_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "is_intraday": is_trading_intraday(quote_dt),
+        "prev_close": safe_float(data.get("f60")) / 100,
+    }
+
+
+def append_intraday_row(rows: list[dict]) -> list[dict]:
+    realtime = None
+    try:
+        realtime = fetch_eastmoney_realtime_row()
+    except Exception as exc:
+        print(f"东方财富实时指数数据暂时不可用: {exc}", file=sys.stderr)
+    if realtime is None:
+        try:
+            realtime = fetch_tencent_realtime_row()
+        except Exception as exc:
+            print(f"腾讯实时指数数据暂时不可用: {exc}", file=sys.stderr)
+            return rows
+    if not realtime or not realtime.get("is_intraday"):
+        return rows
+    output = [dict(row) for row in rows]
+    if output and realtime["date"] < output[-1]["date"]:
+        return output
+    realtime["intraday"] = True
+    realtime["status_note"] = "交易中，盘中数据会波动，收盘后才会固化"
+    if output and realtime["date"] == output[-1]["date"]:
+        output[-1] = realtime
+    else:
+        output.append(realtime)
+    return output
 
 
 def parse_ths_line_payload(text: str) -> list[dict]:
@@ -272,6 +414,37 @@ def fetch_kline(begin: str, end: str) -> list[dict]:
     return fetch_tencent_kline(SYMBOL, begin, end)
 
 
+def eastmoney_json(url: str) -> dict:
+    last_error: Exception | None = None
+    for _ in range(3):
+        try:
+            request = urllib.request.Request(url, headers=REQUEST_HEADERS)
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            last_error = exc
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "-L",
+                "-A",
+                REQUEST_HEADERS["User-Agent"],
+                "-e",
+                REQUEST_HEADERS["Referer"],
+                "--max-time",
+                "20",
+                url,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+    except Exception as exc:
+        raise RuntimeError(f"Eastmoney request failed: {last_error}; curl fallback failed: {exc}") from exc
+
+
 def eastmoney_clist(fs: str, fields: str, page_size: int = 100, sort_field: str = "f3") -> list[dict]:
     page_size = max(1, min(page_size, 100))
     rows: list[dict] = []
@@ -283,15 +456,7 @@ def eastmoney_clist(fs: str, fields: str, page_size: int = 100, sort_field: str 
             f"pn={page}&pz={page_size}&po=1&np=1&fltt=2&invt=2&fid={sort_field}"
             f"&fs={fs}&fields={fields}"
         )
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://quote.eastmoney.com/",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        payload = eastmoney_json(url)
         if payload.get("rc") != 0:
             raise RuntimeError(f"Eastmoney API error: {payload!r}")
         data = payload.get("data", {}) or {}
@@ -408,7 +573,7 @@ def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
     }
 
 
-def fetch_market_structure(trade_date: str) -> dict:
+def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) -> dict:
     stocks = eastmoney_clist(ALL_A_FS, "f12,f14,f3,f6,f2", page_size=6000)
     industries = sector_signal(eastmoney_clist(INDUSTRY_FS, "f12,f14,f3,f6,f62", page_size=30))
     concepts = sector_signal(eastmoney_clist(CONCEPT_FS, "f12,f14,f3,f6,f62", page_size=30))
@@ -422,9 +587,23 @@ def fetch_market_structure(trade_date: str) -> dict:
     big_drop = sum(item["f3"] <= -7 for item in valid)
     amount = sum(safe_float(item.get("f6")) for item in valid)
     up_ratio = up / len(valid) * 100 if valid else 0
+    quote_time = None
+    is_intraday = False
+    elapsed = 240
+    amount_projected = amount
+    if intraday_quote and intraday_quote.get("is_intraday"):
+        quote_time = str(intraday_quote.get("quote_time") or "")
+        is_intraday = True
+        try:
+            quote_dt = dt.datetime.strptime(quote_time, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            quote_dt = dt.datetime.now()
+        amount_projected, elapsed = project_full_day_amount(amount, quote_dt)
 
     snapshot = {
         "date": trade_date,
+        "quote_time": quote_time or now_text(),
+        "is_intraday": is_intraday,
         "breadth": {
             "total": len(valid),
             "up": up,
@@ -435,6 +614,9 @@ def fetch_market_structure(trade_date: str) -> dict:
             "limit_down": limit_down,
             "big_drop": big_drop,
             "amount": amount,
+            "amount_projected": amount_projected,
+            "elapsed_minutes": elapsed,
+            "amount_note": "盘中按已交易分钟外推预计全天成交额" if is_intraday else "收盘后正式成交额",
         },
         "top_industries": industries[:10],
         "top_concepts": concepts[:10],
@@ -444,9 +626,9 @@ def fetch_market_structure(trade_date: str) -> dict:
     return snapshot
 
 
-def update_market_structure(trade_date: str) -> dict | None:
+def update_market_structure(trade_date: str, intraday_quote: dict | None = None) -> dict | None:
     try:
-        snapshot = fetch_market_structure(trade_date)
+        snapshot = fetch_market_structure(trade_date, intraday_quote=intraday_quote)
     except Exception as exc:
         print(f"市场结构数据暂时不可用: {exc}", file=sys.stderr)
         return None
@@ -462,6 +644,44 @@ def attach_market_structure(rows: list[dict]) -> list[dict]:
     for row in rows:
         row["market"] = by_date.get(row["date"])
     return rows
+
+
+def fallback_intraday_market(row: dict) -> dict | None:
+    amount = safe_float(row.get("amount"))
+    if amount <= 0:
+        return None
+    return {
+        "date": row["date"],
+        "quote_time": row.get("quote_time"),
+        "is_intraday": True,
+        "partial": True,
+        "breadth": {
+            "total": 0,
+            "up": 0,
+            "down": 0,
+            "flat": 0,
+            "up_ratio": 0,
+            "limit_up": 0,
+            "limit_down": 0,
+            "big_drop": 0,
+            "amount": amount,
+            "amount_projected": safe_float(row.get("amount_projected"), amount),
+            "elapsed_minutes": int(row.get("elapsed_minutes") or 0),
+            "amount_note": "市场宽度接口暂不可用；这里展示中证全指成交额，按已交易分钟外推预计全天",
+        },
+        "top_industries": [],
+        "top_concepts": [],
+        "mainline": {
+            "status": "数据暂缺",
+            "has_mainline": False,
+            "emotion_active": False,
+            "sector_names": [],
+            "overlap_3d": 0,
+            "top_pct": 0,
+            "avg_top3_pct": 0,
+            "note": "市场宽度/板块接口暂不可用，仅保留指数盘中成交额预测",
+        },
+    }
 
 
 def load_raw_rows() -> list[dict]:
@@ -729,6 +949,8 @@ def update_data(begin: str = DEFAULT_BEGIN, end: str | None = None) -> list[dict
         last_date = parse_date(old_rows[-1]["date"])
         fetch_begin = (last_date - dt.timedelta(days=10)).strftime("%Y-%m-%d")
     new_rows = fetch_kline(fetch_begin, end)
+    if is_trading_intraday(dt.datetime.now()):
+        new_rows = [row for row in new_rows if row["date"] != today_text()]
     merged = merge_rows(old_rows, new_rows)
     if not merged:
         raise RuntimeError("No K-line data fetched.")
@@ -737,6 +959,19 @@ def update_data(begin: str = DEFAULT_BEGIN, end: str | None = None) -> list[dict
     update_market_structure(states[-1]["date"])
     attach_market_structure(states)
     save_states_csv(states)
+    return states
+
+
+def build_display_states(include_intraday: bool = True, refresh_market: bool = False) -> list[dict]:
+    raw_rows = load_raw_rows()
+    if include_intraday:
+        raw_rows = append_intraday_row(raw_rows)
+    states = calculate_states(raw_rows)
+    if states and states[-1].get("intraday") and refresh_market:
+        update_market_structure(states[-1]["date"], intraday_quote=states[-1])
+    attach_market_structure(states)
+    if states and states[-1].get("intraday") and not states[-1].get("market"):
+        states[-1]["market"] = fallback_intraday_market(states[-1])
     return states
 
 
@@ -749,7 +984,12 @@ def print_today(rows: list[dict]) -> None:
     recent = rows[-5:]
     recent_text = " ".join(f"{item['date']}:{item['state']}" for item in recent)
     print(f"{INDEX_NAME} 指数环境日报")
-    print(f"日期: {row['date']}")
+    if row.get("intraday"):
+        print(f"日期: {row['date']}（交易中，盘中临时判断）")
+        print(f"盘中更新时间: {row.get('quote_time', '-')}")
+        print("提示: 盘中状态会随价格和成交额变化，收盘后才会固化为正式历史。")
+    else:
+        print(f"日期: {row['date']}")
     print(f"状态: {row['state']}  分数: {row['score']}  阶段: {row['phase']}")
     print(f"仓位建议: {position_advice(row)}")
     print(
@@ -763,14 +1003,25 @@ def print_today(rows: list[dict]) -> None:
     if market:
         breadth = market["breadth"]
         mainline = market["mainline"]
-        print(
-            "市场宽度: "
-            f"上涨 {breadth['up']} / 下跌 {breadth['down']} / "
-            f"上涨比例 {fmt_num(breadth['up_ratio'])}% / "
-            f"涨停 {breadth['limit_up']} / 跌停 {breadth['limit_down']} / "
-            f"大跌股 {breadth['big_drop']}"
-        )
-        print(f"市场成交额: {fmt_amount(breadth['amount'])}")
+        if market.get("partial"):
+            print("市场宽度: 暂不可用")
+        else:
+            print(
+                "市场宽度: "
+                f"上涨 {breadth['up']} / 下跌 {breadth['down']} / "
+                f"上涨比例 {fmt_num(breadth['up_ratio'])}% / "
+                f"涨停 {breadth['limit_up']} / 跌停 {breadth['limit_down']} / "
+                f"大跌股 {breadth['big_drop']}"
+            )
+        if market.get("is_intraday"):
+            print(
+                "市场成交额: "
+                f"当前 {fmt_amount(breadth['amount'])} / "
+                f"预计全天 {fmt_amount(breadth.get('amount_projected', breadth['amount']))}"
+            )
+            print(f"成交额口径: {breadth.get('amount_note', '盘中预测')}")
+        else:
+            print(f"市场成交额: {fmt_amount(breadth['amount'])}")
         print(f"主线判断: {mainline['status']}，{mainline['note']}")
         if mainline.get("sector_names"):
             print(f"强势方向: {' / '.join(mainline['sector_names'][:5])}")
@@ -796,6 +1047,11 @@ def json_for_chart(rows: list[dict]) -> str:
                 "score": row["score"],
                 "phase": row["phase"],
                 "pct": row.get("pct_change", 0.0),
+                "intraday": bool(row.get("intraday")),
+                "quoteTime": row.get("quote_time"),
+                "statusNote": row.get("status_note"),
+                "amount": row.get("amount"),
+                "amountProjected": row.get("amount_projected"),
                 "ma5": row.get("ma5"),
                 "ma10": row.get("ma10"),
                 "ma20": row.get("ma20"),
@@ -815,6 +1071,19 @@ def render_html(rows: list[dict]) -> Path:
     state = latest["state"]
     color = STATE_COLORS[state]
     updated = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    is_intraday = bool(latest.get("intraday"))
+    data_mode = "交易中 · 盘中临时判断" if is_intraday else "收盘口径"
+    quote_time = latest.get("quote_time") or updated
+    date_label = f"{latest['date']}（交易中）" if is_intraday else latest["date"]
+    intraday_banner = ""
+    if is_intraday:
+        intraday_banner = (
+            '<section class="live-banner">'
+            '<strong>交易中</strong>'
+            f'<span>当前为盘中实时分析，更新时间 {html.escape(str(quote_time))}。'
+            "多/转/空和成交额预测会随盘面变化，收盘后才会固化为正式历史。</span>"
+            "</section>"
+        )
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -873,6 +1142,33 @@ def render_html(rows: list[dict]) -> Path:
       color: white;
       font-size: 28px;
       font-weight: 800;
+    }}
+    .live-banner {{
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid #f59e0b;
+      background: #fff7ed;
+      color: #9a3412;
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      line-height: 1.55;
+    }}
+    .live-banner strong {{
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 64px;
+      height: 30px;
+      border-radius: 6px;
+      background: #f97316;
+      color: white;
+      font-size: 15px;
+    }}
+    .live-banner span {{
+      font-size: 14px;
     }}
     .summary {{
       display: grid;
@@ -1105,12 +1401,13 @@ def render_html(rows: list[dict]) -> Path:
   <header>
     <div>
       <h1>{INDEX_NAME}指数环境</h1>
-      <div class="sub">主判指数 {html.escape(INDEX_NAME)} {html.escape(INDEX_CODE)} · 数据更新 {html.escape(updated)} · 收盘口径</div>
+      <div class="sub">主判指数 {html.escape(INDEX_NAME)} {html.escape(INDEX_CODE)} · 数据更新 {html.escape(updated)} · {html.escape(data_mode)}</div>
     </div>
     <div class="badge">{html.escape(state)}</div>
   </header>
+  {intraday_banner}
   <section class="summary">
-    <div class="metric"><span>日期</span><b>{html.escape(latest["date"])}</b></div>
+    <div class="metric"><span>日期</span><b>{html.escape(date_label)}</b></div>
     <div class="metric"><span>分数</span><b>{latest["score"]}</b></div>
     <div class="metric"><span>阶段</span><b>{html.escape(latest["phase"])}</b></div>
     <div class="metric"><span>仓位建议</span><b>{html.escape(position_advice(latest))}</b></div>
@@ -1228,7 +1525,12 @@ function updateDetail(index) {{
   const market = row.market;
   const breadth = market ? market.breadth : null;
   const mainline = market ? market.mainline : null;
-  detailTitle.textContent = `${{row.d}} 择时评分明细`;
+  const amountText = breadth
+    ? (market && market.is_intraday
+      ? `当前 ${{fmtAmount(breadth.amount)}} / 预计全天 ${{fmtAmount(breadth.amount_projected)}}`
+      : fmtAmount(breadth.amount))
+    : "-";
+  detailTitle.textContent = `${{row.d}}${{row.intraday ? "（交易中）" : ""}} 择时评分明细`;
   const items = [
     ["状态", row.s],
     ["分数", `${{row.score}}分`],
@@ -1242,10 +1544,10 @@ function updateDetail(index) {{
     ["成交量", fmt(row.v, 0)],
     ["MA5", fmt(row.ma5)],
     ["MA20", fmt(row.ma20)],
-    ["上涨比例", breadth ? `${{fmt(breadth.up_ratio)}}%` : "-"],
-    ["涨停/跌停", breadth ? `${{breadth.limit_up}} / ${{breadth.limit_down}}` : "-"],
-    ["大跌股", breadth ? breadth.big_drop : "-"],
-    ["全市场成交额", breadth ? fmtAmount(breadth.amount) : "-"],
+    ["上涨比例", breadth && !market.partial ? `${{fmt(breadth.up_ratio)}}%` : "-"],
+    ["涨停/跌停", breadth && !market.partial ? `${{breadth.limit_up}} / ${{breadth.limit_down}}` : "-"],
+    ["大跌股", breadth && !market.partial ? breadth.big_drop : "-"],
+    ["全市场成交额", amountText],
     ["主线状态", mainline ? mainline.status : "-"],
     ["主线连续性", mainline ? `${{mainline.overlap_3d}}个重合方向` : "-"]
   ];
@@ -1262,7 +1564,10 @@ function updateDetail(index) {{
       : "暂无";
     marketNote.innerHTML =
       `<b>市场结构：</b>${{escapeHtml(mainline.note)}}<br>` +
-      `<b>强势方向：</b>${{escapeHtml(sectors)}}`;
+      `<b>强势方向：</b>${{escapeHtml(sectors)}}` +
+      (market.is_intraday && breadth && breadth.amount_note
+        ? `<br><b>成交额口径：</b>${{escapeHtml(breadth.amount_note)}}`
+        : "");
   }} else {{
     marketNote.innerHTML = "<b>市场结构：</b>暂无当日涨跌家数/主线数据";
   }}
@@ -1591,18 +1896,15 @@ def command_update(args: argparse.Namespace) -> int:
 
 
 def command_today(_: argparse.Namespace) -> int:
-    rows = load_states()
+    rows = build_display_states(include_intraday=True, refresh_market=True)
     print_today(rows)
     return 0
 
 
 def command_render(_: argparse.Namespace) -> int:
-    rows = calculate_states(load_raw_rows())
+    rows = build_display_states(include_intraday=True, refresh_market=False)
     if not rows:
         raise RuntimeError("没有可用的中证全指数据，请先运行 update。")
-    if rows:
-        attach_market_structure(rows)
-        save_states_csv(rows)
     path = render_html(rows)
     print(f"已生成网页: {path}")
     print(f"默认首页: {INDEX_HTML}")
@@ -1612,9 +1914,10 @@ def command_render(_: argparse.Namespace) -> int:
 
 
 def command_all(args: argparse.Namespace) -> int:
-    rows = update_data(begin=args.begin, end=args.end)
-    print_today(rows)
-    path = render_html(rows)
+    update_data(begin=args.begin, end=args.end)
+    display_rows = build_display_states(include_intraday=True, refresh_market=True)
+    print_today(display_rows)
+    path = render_html(display_rows)
     print("")
     print(f"网页: {path}")
     print(f"默认首页: {INDEX_HTML}")
