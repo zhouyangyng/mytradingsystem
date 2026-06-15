@@ -963,7 +963,7 @@ def build_confirmation(main_row: dict) -> dict:
     if sense_summary:
         sense_text = f"{SENSE_INDEX_NAME}{sense_summary['state']}（{sense_summary['score']}分）"
     else:
-        sense_text = "暂无平均股价/体感指数数据"
+        sense_text = ""
 
     if small_bull >= 2:
         style_text = "中小盘/题材风格强"
@@ -1152,7 +1152,8 @@ def print_today(rows: list[dict]) -> None:
     else:
         print("市场结构: 暂无当日涨跌家数/主线数据")
     confirmation = row.get("confirmation") or build_confirmation(row)
-    print(f"体感确认: {confirmation['sense_text']}")
+    if confirmation.get("sense_text"):
+        print(f"体感确认: {confirmation['sense_text']}")
     print(f"风格确认: {confirmation['style']}")
     print(f"综合结论: {confirmation['conclusion']}")
     for item in confirmation.get("indices", []):
@@ -1732,7 +1733,7 @@ function updateDetail(index) {{
   if (row.confirmation) {{
     const c = row.confirmation;
     confirmSummary.innerHTML =
-      `<b>体感确认：</b>${{escapeHtml(c.sense_text || "暂无")}}<br>` +
+      (c.sense_text ? `<b>体感确认：</b>${{escapeHtml(c.sense_text)}}<br>` : "") +
       `<b>风格确认：</b>${{escapeHtml(c.style || "暂无")}}<br>` +
       `<b>综合结论：</b>${{escapeHtml(c.conclusion || "暂无")}}`;
     confirmList.innerHTML = (c.indices || []).map(item => {{
