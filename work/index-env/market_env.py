@@ -557,11 +557,12 @@ def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
     emotion_boards = [
         item for item in snapshot["top_concepts"][:10] if any(keyword in item["name"] for keyword in EMOTION_KEYWORDS)
     ]
-    emotion_active = breadth["limit_up"] >= 50 or any(item["pct"] >= 3 for item in emotion_boards)
+    emotion_active = breadth.get("limit_up", 0) >= 50 or any(item["pct"] >= 3 for item in emotion_boards)
+    mainline_title, core_branches, side_branches = classify_mainline(sectors)
 
     if has_mainline:
         status = "有主线"
-        note = f"强势方向集中在 {', '.join(sector_names[:3])}"
+        note = f"强势方向集中在 {mainline_title or ', '.join(sector_names[:3])}"
     elif emotion_active:
         status = "妖股情绪"
         note = "主线不清晰，但涨停/连板情绪活跃"
@@ -574,6 +575,9 @@ def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
         "has_mainline": has_mainline,
         "emotion_active": emotion_active,
         "sector_names": sector_names[:8],
+        "title": mainline_title or (sector_names[0] if sector_names else "暂无"),
+        "core_branches": core_branches,
+        "side_branches": side_branches,
         "overlap_3d": overlap,
         "top_pct": top_pct,
         "avg_top3_pct": avg_top3,
@@ -581,10 +585,73 @@ def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
     }
 
 
+def classify_mainline(sectors: list[dict]) -> tuple[str, list[str], list[str]]:
+    names = [item["name"] for item in sectors]
+    ai_keywords = (
+        "CPO",
+        "PCB",
+        "MLCC",
+        "被动元件",
+        "光通信",
+        "光纤",
+        "铜缆",
+        "高带宽",
+        "先进封装",
+        "AI芯片",
+        "元件",
+        "分立器件",
+        "电子化学品",
+        "集成电路",
+        "激光",
+    )
+    resource_keywords = ("钼", "钨", "铜", "白银", "黄金", "小金属", "钴", "镍")
+    ai = [name for name in names if any(keyword in name for keyword in ai_keywords)]
+    resource = [name for name in names if any(keyword in name for keyword in resource_keywords)]
+    if len(ai) >= 3:
+        return f"AI硬件 / {pick_subtheme(ai)}", ai[:8], resource[:5]
+    if len(resource) >= 3:
+        return f"资源金属 / {pick_subtheme(resource)}", resource[:8], ai[:5]
+    return (" / ".join(names[:2]) if names else "暂无", names[:6], [])
+
+
+def pick_subtheme(names: list[str]) -> str:
+    groups = [
+        ("PCB", ("PCB", "印制电路板")),
+        ("CPO", ("CPO", "光通信", "光纤", "铜缆")),
+        ("被动元件", ("MLCC", "被动元件", "元件")),
+        ("先进封装", ("先进封装", "高带宽", "集成电路")),
+        ("激光设备", ("激光",)),
+        ("钨钼", ("钨", "钼")),
+        ("铜", ("铜",)),
+        ("贵金属", ("白银", "黄金")),
+        ("小金属", ("小金属", "钴", "镍")),
+    ]
+    for label, keywords in groups:
+        if any(any(keyword in name for keyword in keywords) for name in names):
+            return label
+    return names[0] if names else "暂无"
+
+
 def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) -> dict:
-    stocks = eastmoney_clist(ALL_A_FS, "f12,f14,f3,f6,f2", page_size=6000)
-    industries = sector_signal(eastmoney_clist(INDUSTRY_FS, "f12,f14,f3,f6,f62", page_size=30))
-    concepts = sector_signal(eastmoney_clist(CONCEPT_FS, "f12,f14,f3,f6,f62", page_size=30))
+    partial = False
+    try:
+        stocks = eastmoney_clist(ALL_A_FS, "f12,f14,f3,f6,f2", page_size=100)
+    except Exception as exc:
+        print(f"全A宽度数据暂时不可用: {exc}", file=sys.stderr)
+        stocks = []
+        partial = True
+    try:
+        industries = sector_signal(eastmoney_clist(INDUSTRY_FS, "f12,f14,f3,f6,f62", page_size=30))
+    except Exception as exc:
+        print(f"行业板块数据暂时不可用: {exc}", file=sys.stderr)
+        industries = []
+        partial = True
+    try:
+        concepts = sector_signal(eastmoney_clist(CONCEPT_FS, "f12,f14,f3,f6,f62", page_size=30))
+    except Exception as exc:
+        print(f"概念板块数据暂时不可用: {exc}", file=sys.stderr)
+        concepts = []
+        partial = True
 
     valid = [item for item in stocks if isinstance(item.get("f3"), (int, float))]
     up = sum(item["f3"] > 0 for item in valid)
@@ -594,6 +661,8 @@ def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) 
     limit_down = sum(is_limit_down(item) for item in valid)
     big_drop = sum(item["f3"] <= -7 for item in valid)
     amount = sum(safe_float(item.get("f6")) for item in valid)
+    if amount <= 0 and intraday_quote:
+        amount = safe_float(intraday_quote.get("amount"))
     up_ratio = up / len(valid) * 100 if valid else 0
     quote_time = None
     is_intraday = False
@@ -612,6 +681,7 @@ def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) 
         "date": trade_date,
         "quote_time": quote_time or now_text(),
         "is_intraday": is_intraday,
+        "partial": partial,
         "breadth": {
             "total": len(valid),
             "up": up,
@@ -639,6 +709,9 @@ def update_market_structure(trade_date: str, intraday_quote: dict | None = None)
         snapshot = fetch_market_structure(trade_date, intraday_quote=intraday_quote)
     except Exception as exc:
         print(f"市场结构数据暂时不可用: {exc}", file=sys.stderr)
+        return None
+    if not snapshot.get("top_industries") and not snapshot.get("top_concepts"):
+        print("市场结构数据暂时不可用: 行业/概念板块为空，保留已有缓存。", file=sys.stderr)
         return None
     rows = [item for item in load_market_structures() if item.get("date") != trade_date]
     rows.append(snapshot)
@@ -1197,6 +1270,46 @@ def json_for_chart(rows: list[dict]) -> str:
     return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
 
 
+def render_mainline_section(row: dict) -> str:
+    market = row.get("market")
+    if not market or not market.get("mainline"):
+        return (
+            '<section class="mainline">'
+            '<div class="mainline-head">'
+            '<div><div class="mainline-title">今日最强主线</div>'
+            '<div class="mainline-name">板块数据暂不可用</div></div>'
+            '<div class="mainline-status">等待刷新</div>'
+            "</div>"
+            '<div class="mainline-body"><div>当前未获取到行业/概念强度数据，稍后刷新或重新运行 all。</div></div>'
+            "</section>"
+        )
+    mainline = market["mainline"]
+    title = mainline.get("title") or mainline.get("status") or "暂无"
+    core = mainline.get("core_branches") or mainline.get("sector_names") or []
+    side = mainline.get("side_branches") or []
+    status = mainline.get("status") or "观察"
+    core_text = " / ".join(core[:8]) if core else "暂无"
+    side_text = " / ".join(side[:6]) if side else "暂无明显强支线"
+    note = mainline.get("note") or ""
+    return (
+        '<section class="mainline">'
+        '<div class="mainline-head">'
+        '<div>'
+        '<div class="mainline-title">今日最强主线</div>'
+        f'<div class="mainline-name">{html.escape(title)}</div>'
+        "</div>"
+        f'<div class="mainline-status">{html.escape(status)}</div>'
+        "</div>"
+        '<div class="mainline-body">'
+        f'<div><b>核心分支</b>{html.escape(core_text)}</div>'
+        f'<div><b>强支线</b>{html.escape(side_text)}</div>'
+        f'<div><b>判断</b>{html.escape(note)}</div>'
+        f'<div><b>更新时间</b>{html.escape(str(market.get("quote_time") or "-"))}</div>'
+        "</div>"
+        "</section>"
+    )
+
+
 def render_html(rows: list[dict]) -> Path:
     if not rows:
         raise RuntimeError("No rows to render.")
@@ -1219,6 +1332,7 @@ def render_html(rows: list[dict]) -> Path:
             "多/转/空和成交额预测会随盘面变化，收盘后才会固化为正式历史。</span>"
             "</section>"
         )
+    mainline_section = render_mainline_section(latest)
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1311,6 +1425,49 @@ def render_html(rows: list[dict]) -> Path:
       gap: 8px;
       margin-bottom: 12px;
     }}
+    .mainline {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-left: 5px solid #2563eb;
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-bottom: 12px;
+    }}
+    .mainline-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }}
+    .mainline-title {{
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 3px;
+    }}
+    .mainline-name {{
+      font-size: 22px;
+      font-weight: 850;
+      line-height: 1.2;
+    }}
+    .mainline-status {{
+      flex: none;
+      border-radius: 6px;
+      padding: 5px 8px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .mainline-body {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      color: #344054;
+      font-size: 13px;
+      line-height: 1.65;
+    }}
+    .mainline-body b {{ display: block; color: var(--ink); margin-bottom: 2px; }}
     .metric {{
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1535,6 +1692,9 @@ def render_html(rows: list[dict]) -> Path:
       main {{ padding: 10px; }}
       header {{ grid-template-columns: 1fr auto; }}
       .summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .mainline-head {{ display: block; }}
+      .mainline-status {{ display: inline-flex; margin-top: 8px; }}
+      .mainline-body {{ grid-template-columns: 1fr; }}
       .chart-head {{ display: block; }}
       .chart-actions {{ margin-top: 10px; justify-content: stretch; }}
       .range {{ width: 100%; justify-content: space-between; }}
@@ -1564,6 +1724,7 @@ def render_html(rows: list[dict]) -> Path:
     <div class="metric"><span>阶段</span><b>{html.escape(latest["phase"])}</b></div>
     <div class="metric"><span>仓位建议</span><b>{html.escape(position_advice(latest))}</b></div>
   </section>
+  {mainline_section}
   <section class="chart-wrap">
     <div class="chart-head">
       <div>
