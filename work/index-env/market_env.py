@@ -21,6 +21,7 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
@@ -59,14 +60,19 @@ CONFIRM_INDICES = [
     {"symbol": "sh000852", "name": "中证1000", "role": "中小盘"},
     {"symbol": "sz399303", "name": "国证2000", "role": "小票题材"},
 ]
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def china_now() -> dt.datetime:
+    return dt.datetime.now(CHINA_TZ).replace(tzinfo=None)
 
 
 def today_text() -> str:
-    return dt.date.today().strftime("%Y-%m-%d")
+    return china_now().strftime("%Y-%m-%d")
 
 
 def now_text() -> str:
-    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return china_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_date(value: str) -> dt.date:
@@ -674,7 +680,7 @@ def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) 
         try:
             quote_dt = dt.datetime.strptime(quote_time, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            quote_dt = dt.datetime.now()
+            quote_dt = china_now()
         amount_projected, elapsed = project_full_day_amount(amount, quote_dt)
 
     snapshot = {
@@ -1144,7 +1150,7 @@ def update_data(begin: str = DEFAULT_BEGIN, end: str | None = None) -> list[dict
         last_date = parse_date(old_rows[-1]["date"])
         fetch_begin = (last_date - dt.timedelta(days=10)).strftime("%Y-%m-%d")
     new_rows = fetch_kline(fetch_begin, end)
-    if is_trading_intraday(dt.datetime.now()):
+    if is_trading_intraday(china_now()):
         new_rows = [row for row in new_rows if row["date"] != today_text()]
     merged = merge_rows(old_rows, new_rows)
     if not merged:
@@ -1318,7 +1324,7 @@ def render_html(rows: list[dict]) -> Path:
     data_json = json_for_chart(rows)
     state = latest["state"]
     color = STATE_COLORS[state]
-    updated = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    updated = now_text()
     is_intraday = bool(latest.get("intraday"))
     data_mode = "交易中 · 盘中临时判断" if is_intraday else "收盘口径"
     quote_time = latest.get("quote_time") or updated
