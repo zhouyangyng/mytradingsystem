@@ -828,6 +828,13 @@ def update_market_structure(trade_date: str, intraday_quote: dict | None = None)
     except Exception as exc:
         print(f"市场结构数据暂时不可用: {exc}", file=sys.stderr)
         return None
+    quote_time = str(snapshot.get("quote_time") or "")
+    if quote_time[:10] and quote_time[:10] != trade_date:
+        print(
+            f"市场结构数据日期不匹配: trade_date={trade_date}, quote_time={quote_time}，保留已有缓存。",
+            file=sys.stderr,
+        )
+        return None
     if not snapshot.get("top_industries") and not snapshot.get("top_concepts"):
         print("市场结构数据暂时不可用: 行业/概念板块为空，保留已有缓存。", file=sys.stderr)
         return None
@@ -1291,7 +1298,8 @@ def update_data(begin: str = DEFAULT_BEGIN, end: str | None = None) -> list[dict
         raise RuntimeError("No K-line data fetched.")
     save_raw_rows(merged)
     states = calculate_states(merged)
-    update_market_structure(states[-1]["date"])
+    if not is_trading_intraday(china_now()) or states[-1]["date"] == today_text():
+        update_market_structure(states[-1]["date"])
     attach_market_structure(states)
     save_states_csv(states)
     return states
