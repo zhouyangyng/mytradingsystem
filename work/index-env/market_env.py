@@ -87,8 +87,13 @@ def is_trading_intraday(moment: dt.datetime) -> bool:
     if moment.weekday() >= 5:
         return False
     start = dt.time(9, 25)
-    end = dt.time(15, 5)
+    end = dt.time(15, 0)
     return start <= moment.time() < end
+
+
+def is_live_trading_quote(quote_dt: dt.datetime) -> bool:
+    current = china_now()
+    return quote_dt.date() == current.date() and is_trading_intraday(current) and is_trading_intraday(quote_dt)
 
 
 def elapsed_trading_minutes(moment: dt.datetime) -> int:
@@ -225,7 +230,7 @@ def fetch_tencent_realtime_row(symbol: str = SYMBOL) -> dict | None:
         "amount_projected": projected_amount,
         "elapsed_minutes": elapsed,
         "quote_time": quote_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "is_intraday": is_trading_intraday(quote_dt),
+        "is_intraday": is_live_trading_quote(quote_dt),
         "prev_close": safe_float(fields[4]),
     }
 
@@ -256,7 +261,7 @@ def fetch_eastmoney_realtime_row() -> dict | None:
         "amount_projected": projected_amount,
         "elapsed_minutes": elapsed,
         "quote_time": quote_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "is_intraday": is_trading_intraday(quote_dt),
+        "is_intraday": is_live_trading_quote(quote_dt),
         "prev_close": safe_float(data.get("f60")) / 100,
     }
 
@@ -814,7 +819,17 @@ def update_market_structure(trade_date: str, intraday_quote: dict | None = None)
 def attach_market_structure(rows: list[dict]) -> list[dict]:
     by_date = {item["date"]: item for item in load_market_structures()}
     for row in rows:
-        row["market"] = by_date.get(row["date"])
+        market = by_date.get(row["date"])
+        if market and market.get("is_intraday") and not row.get("intraday"):
+            market = dict(market)
+            breadth = dict(market.get("breadth") or {})
+            if safe_float(breadth.get("amount_projected")) > 0:
+                breadth["amount"] = breadth["amount_projected"]
+            breadth["amount_note"] = "收盘后展示最近一次市场结构快照，等待正式宽度/板块数据刷新"
+            market["breadth"] = breadth
+            market["is_intraday"] = False
+            market["snapshot_note"] = "市场结构来自盘中最近一次快照"
+        row["market"] = market
     return rows
 
 
@@ -1831,7 +1846,7 @@ def render_html(rows: list[dict]) -> Path:
     </div>
     <div class="badge">{html.escape(state)}</div>
   </header>
-  {intraday_banner}
+{intraday_banner}
   <section class="summary">
     <div class="metric"><span>日期</span><b>{html.escape(date_label)}</b></div>
     <div class="metric"><span>分数</span><b>{latest["score"]}</b></div>
