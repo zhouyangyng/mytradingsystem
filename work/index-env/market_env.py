@@ -535,7 +535,14 @@ def non_emotion_sectors(items: list[dict]) -> list[dict]:
 def load_market_structures() -> list[dict]:
     if not MARKET_STRUCTURE_JSON.exists():
         return []
-    return json.loads(MARKET_STRUCTURE_JSON.read_text(encoding="utf-8"))
+    rows = json.loads(MARKET_STRUCTURE_JSON.read_text(encoding="utf-8"))
+    normalized: list[dict] = []
+    for row in sorted(rows, key=lambda item: item.get("date", "")):
+        if row.get("breadth") and (row.get("top_industries") or row.get("top_concepts")):
+            row = dict(row)
+            row["mainline"] = assess_market_structure(row, normalized)
+        normalized.append(row)
+    return normalized
 
 
 def save_market_structures(rows: list[dict]) -> None:
@@ -558,23 +565,33 @@ def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
     overlap = len(set(sector_names[:5]) & prev_names)
     top_pct = sectors[0]["pct"] if sectors else 0
     avg_top3 = sum(item["pct"] for item in sectors[:3]) / max(1, min(3, len(sectors)))
-    has_mainline = top_pct >= 3.5 and (avg_top3 >= 2.5 or overlap >= 2)
+    mainline_title, core_branches, side_branches = classify_mainline(sectors)
+    leadership_score, leadership_factors = score_mainline_leadership(
+        sectors,
+        breadth,
+        overlap,
+        top_pct,
+        avg_top3,
+        core_branches,
+    )
+    has_mainline = top_pct >= 3.5 and avg_top3 >= 2.5 and leadership_score >= 5.5
 
     emotion_boards = [
         item for item in snapshot["top_concepts"][:10] if any(keyword in item["name"] for keyword in EMOTION_KEYWORDS)
     ]
     emotion_active = breadth.get("limit_up", 0) >= 50 or any(item["pct"] >= 3 for item in emotion_boards)
-    mainline_title, core_branches, side_branches = classify_mainline(sectors)
 
     if has_mainline:
         status = "有主线"
-        note = f"强势方向集中在 {mainline_title or ', '.join(sector_names[:3])}"
+        factor_text = "、".join(leadership_factors[:3])
+        note = f"强势方向集中在 {mainline_title or ', '.join(sector_names[:3])}，{factor_text}"
     elif emotion_active:
         status = "妖股情绪"
         note = "主线不清晰，但涨停/连板情绪活跃"
     else:
         status = "无主线"
-        note = "强势方向持续性不足，适合降低预期"
+        factor_text = "、".join(leadership_factors[:2]) if leadership_factors else "缺少持续性/主动性确认"
+        note = f"强势方向领导力不足（{factor_text}），适合降低预期"
 
     return {
         "status": status,
@@ -587,8 +604,76 @@ def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
         "overlap_3d": overlap,
         "top_pct": top_pct,
         "avg_top3_pct": avg_top3,
+        "leadership_score": round(leadership_score, 1),
+        "leadership_factors": leadership_factors,
         "note": note,
     }
+
+
+def score_mainline_leadership(
+    sectors: list[dict],
+    breadth: dict,
+    overlap: int,
+    top_pct: float,
+    avg_top3: float,
+    core_branches: list[str],
+) -> tuple[float, list[str]]:
+    score = 0.0
+    factors: list[str] = []
+    if not sectors:
+        return score, factors
+
+    top_amount = max(safe_float(item.get("amount")) for item in sectors[:5])
+    top3_amount = sum(safe_float(item.get("amount")) for item in sectors[:3])
+    net_positive_count = sum(1 for item in sectors[:5] if safe_float(item.get("net")) > 0)
+    net_sum = sum(safe_float(item.get("net")) for item in sectors[:5])
+    up_ratio = safe_float(breadth.get("up_ratio"))
+    limit_up = int(safe_float(breadth.get("limit_up")))
+
+    if top_pct >= 5:
+        score += 2
+        factors.append("领涨强度高")
+    elif top_pct >= 3.5:
+        score += 1
+        factors.append("领涨强度达标")
+    if avg_top3 >= 3.5:
+        score += 1.5
+        factors.append("前三强度集中")
+    elif avg_top3 >= 2.5:
+        score += 1
+        factors.append("前三强度达标")
+    if overlap >= 2:
+        score += 2
+        factors.append("近3日方向延续")
+    elif overlap >= 1:
+        score += 1
+        factors.append("有延续迹象")
+    if top_amount >= 100_000_000_000 or top3_amount >= 200_000_000_000:
+        score += 1.5
+        factors.append("成交额有市场地位")
+    elif top_amount >= 50_000_000_000:
+        score += 1
+        factors.append("成交额体量尚可")
+    if net_positive_count >= 3 and net_sum > 0:
+        score += 1.5
+        factors.append("主动资金净流入")
+    elif net_positive_count >= 2:
+        score += 0.8
+        factors.append("主动资金有承接")
+    if len(core_branches) >= 4:
+        score += 1.5
+        factors.append("核心分支成簇")
+    elif len(core_branches) >= 2:
+        score += 0.8
+        factors.append("有分支联动")
+    if up_ratio >= 55 or limit_up >= 60:
+        score += 1
+        factors.append("市场带动较强")
+    elif up_ratio <= 35 and limit_up < 40:
+        score -= 1
+        factors.append("市场带动偏弱")
+
+    return score, factors
 
 
 def classify_mainline(sectors: list[dict]) -> tuple[str, list[str], list[str]]:
@@ -954,6 +1039,13 @@ def calculate_states(rows: list[dict]) -> list[dict]:
         else:
             state = "转"
 
+        transition_limited = False
+        if state == "多" and output and output[-1]["state"] == "空":
+            state = "转"
+            score = min(score, 69)
+            transition_limited = True
+            reasons.append("空头后首日修复，先按转处理，需次日确认 +0")
+
         enriched = {
             **row,
             "ma5": ma5,
@@ -964,6 +1056,7 @@ def calculate_states(rows: list[dict]) -> list[dict]:
             "pct_change": pct_change,
             "score": int(round(score)),
             "state": state,
+            "transition_limited": transition_limited,
             "phase": "",
             "reasons": "；".join(reasons) if reasons else "样本不足，默认观察",
         }
@@ -1089,6 +1182,10 @@ def position_advice(row: dict) -> str:
 
     if row["state"] == "空":
         return "0%-20%，指数主跌/防守，不适合重仓"
+    if row.get("transition_limited"):
+        if has_mainline:
+            return "20%-40%，空头后首日修复，有主线也先等次日确认"
+        return "10%-30%，空头后首日修复，先观察持续性"
     if row["phase"] == "主升" and has_mainline:
         return "70%-90%，指数主升且有主线，可重仓主线"
     if row["phase"] == "主升":
@@ -1119,7 +1216,7 @@ def save_states_csv(rows: list[dict]) -> None:
         "reasons",
     ]
     with STATES_CSV.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row[key] for key in fieldnames})
@@ -1226,6 +1323,9 @@ def print_today(rows: list[dict]) -> None:
         else:
             print(f"市场成交额: {fmt_amount(breadth['amount'])}")
         print(f"主线判断: {mainline['status']}，{mainline['note']}")
+        if mainline.get("leadership_score") is not None:
+            factors = " / ".join(mainline.get("leadership_factors") or [])
+            print(f"主线领导力: {mainline['leadership_score']}分" + (f"（{factors}）" if factors else ""))
         if mainline.get("sector_names"):
             print(f"强势方向: {' / '.join(mainline['sector_names'][:5])}")
     else:
@@ -1259,6 +1359,7 @@ def json_for_chart(rows: list[dict]) -> str:
                 "s": row["state"],
                 "score": row["score"],
                 "phase": row["phase"],
+                "transitionLimited": bool(row.get("transition_limited")),
                 "pct": row.get("pct_change", 0.0),
                 "intraday": bool(row.get("intraday")),
                 "quoteTime": row.get("quote_time"),
@@ -1297,6 +1398,8 @@ def render_mainline_section(row: dict) -> str:
     core_text = " / ".join(core[:8]) if core else "暂无"
     side_text = " / ".join(side[:6]) if side else "暂无明显强支线"
     note = mainline.get("note") or ""
+    leadership_score = mainline.get("leadership_score")
+    leadership_factors = " / ".join(mainline.get("leadership_factors") or [])
     return (
         '<section class="mainline">'
         '<div class="mainline-head">'
@@ -1309,6 +1412,8 @@ def render_mainline_section(row: dict) -> str:
         '<div class="mainline-body">'
         f'<div><b>核心分支</b>{html.escape(core_text)}</div>'
         f'<div><b>强支线</b>{html.escape(side_text)}</div>'
+        f'<div><b>领导力分</b>{html.escape(str(leadership_score if leadership_score is not None else "-"))}</div>'
+        f'<div><b>依据</b>{html.escape(leadership_factors or "暂无")}</div>'
         f'<div><b>判断</b>{html.escape(note)}</div>'
         f'<div><b>更新时间</b>{html.escape(str(market.get("quote_time") or "-"))}</div>'
         "</div>"
@@ -1344,6 +1449,9 @@ def render_html(rows: list[dict]) -> Path:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>{INDEX_NAME}指数环境</title>
   <style>
     :root {{
@@ -1826,6 +1934,8 @@ function positionAdvice(row) {{
   const hasMainline = Boolean(mainline.has_mainline);
   const emotionActive = Boolean(mainline.emotion_active);
   if (row.s === "空") return "0%-20%，指数主跌/防守，不适合重仓";
+  if (row.transitionLimited && hasMainline) return "20%-40%，空头后首日修复，有主线也先等次日确认";
+  if (row.transitionLimited) return "10%-30%，空头后首日修复，先观察持续性";
   if (row.phase === "主升" && hasMainline) return "70%-90%，指数主升且有主线，可重仓主线";
   if (row.phase === "主升") return "60%-80%，指数主升但主线确认不足";
   if ((row.s === "多" || row.s === "转") && hasMainline) return "40%-60%，指数震荡/试攻，有主线可参与主线";
@@ -1861,6 +1971,7 @@ function updateDetail(index) {{
     ["状态", row.s],
     ["分数", `${{row.score}}分`],
     ["阶段", row.phase],
+    ["首日修复限制", row.transitionLimited ? "是，需次日确认" : "否"],
     ["仓位建议", positionAdvice(row)],
     ["开盘", fmt(row.o)],
     ["最高", fmt(row.h)],
@@ -1875,7 +1986,8 @@ function updateDetail(index) {{
     ["大跌股", breadth && !market.partial ? breadth.big_drop : "-"],
     ["全市场成交额", amountText],
     ["主线状态", mainline ? mainline.status : "-"],
-    ["主线连续性", mainline ? `${{mainline.overlap_3d}}个重合方向` : "-"]
+    ["主线连续性", mainline ? `${{mainline.overlap_3d}}个重合方向` : "-"],
+    ["主线领导力", mainline && mainline.leadership_score !== undefined ? `${{mainline.leadership_score}}分` : "-"]
   ];
   detailGrid.innerHTML = items.map(([label, value]) =>
     `<div class="detail-item"><span>${{escapeHtml(label)}}</span><b>${{escapeHtml(value)}}</b></div>`
@@ -2193,6 +2305,38 @@ document.getElementById("zoomOut").addEventListener("click", () => zoom(1.35, 0.
 document.querySelectorAll(".range button").forEach(btn => {{
   btn.addEventListener("click", () => setRange(btn.dataset.range));
 }});
+
+function chinaTimeParts() {{
+  const parts = new Intl.DateTimeFormat("en-US", {{
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }}).formatToParts(new Date());
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return {{
+    weekday: map.weekday,
+    minutes: Number(map.hour) * 60 + Number(map.minute)
+  }};
+}}
+
+function isChinaTradingWindow() {{
+  const t = chinaTimeParts();
+  if (t.weekday === "Sat" || t.weekday === "Sun") return false;
+  return (t.minutes >= 9 * 60 + 25 && t.minutes <= 11 * 60 + 35)
+    || (t.minutes >= 13 * 60 && t.minutes <= 15 * 60 + 10);
+}}
+
+function refreshWithCacheBuster() {{
+  const url = new URL(window.location.href);
+  url.searchParams.set("live", String(Date.now()));
+  window.location.replace(url.toString());
+}}
+
+if (isChinaTradingWindow()) {{
+  setTimeout(refreshWithCacheBuster, 2 * 60 * 1000);
+}}
 window.addEventListener("resize", resize);
 updateDetail(selectedIndex);
 resize();
