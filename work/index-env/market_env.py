@@ -560,7 +560,7 @@ def save_market_structures(rows: list[dict]) -> None:
 
 def assess_market_structure(snapshot: dict, history: list[dict]) -> dict:
     breadth = snapshot["breadth"]
-    sectors = non_emotion_sectors(snapshot["top_industries"][:8] + snapshot["top_concepts"][:8])
+    sectors = non_emotion_sectors(snapshot["top_industries"][:12] + snapshot["top_concepts"][:30])
     sector_names = [item["name"] for item in sectors[:8]]
     prev_names = {
         name
@@ -683,36 +683,58 @@ def score_mainline_leadership(
 
 def classify_mainline(sectors: list[dict]) -> tuple[str, list[str], list[str]]:
     names = [item["name"] for item in sectors]
-    ai_keywords = (
-        "CPO",
-        "PCB",
-        "MLCC",
-        "被动元件",
-        "光通信",
-        "光纤",
-        "铜缆",
-        "高带宽",
-        "先进封装",
-        "AI芯片",
-        "元件",
-        "分立器件",
-        "电子化学品",
-        "集成电路",
-        "激光",
-    )
     resource_keywords = ("钼", "钨", "铜", "白银", "黄金", "小金属", "钴", "镍")
-    ai = [name for name in names if any(keyword in name for keyword in ai_keywords)]
+    ai, ai_subthemes = classify_ai_hardware(sectors)
     resource = [name for name in names if any(keyword in name for keyword in resource_keywords)]
-    if len(ai) >= 3:
-        return f"AI硬件 / {pick_subtheme(ai)}", ai[:8], resource[:5]
+    if len(ai) >= 2:
+        subtheme_text = "+".join(item["label"] for item in ai_subthemes[:2]) if ai_subthemes else pick_subtheme(ai)
+        return f"AI硬件 / {subtheme_text}", ai[:8], resource[:5]
     if len(resource) >= 3:
         return f"资源金属 / {pick_subtheme(resource)}", resource[:8], ai[:5]
     return (" / ".join(names[:2]) if names else "暂无", names[:6], [])
 
 
+def classify_ai_hardware(sectors: list[dict]) -> tuple[list[str], list[dict]]:
+    subthemes = [
+        ("PCB/PET铜箔", ("PCB", "印制电路板", "PET铜箔", "复合集流体", "铜箔")),
+        ("CPO", ("CPO", "光通信", "光纤", "铜缆", "通信线缆")),
+        ("被动元件", ("MLCC", "被动元件", "元件")),
+        ("先进封装", ("先进封装", "高带宽", "集成电路")),
+        ("激光设备", ("激光",)),
+        ("半导体材料", ("电子化学品", "分立器件", "AI芯片")),
+    ]
+    matched_names: list[str] = []
+    scored: list[dict] = []
+    for label, keywords in subthemes:
+        matched = [item for item in sectors if any(keyword in item["name"] for keyword in keywords)]
+        if not matched:
+            continue
+        names = [item["name"] for item in matched]
+        matched_names.extend(name for name in names if name not in matched_names)
+        best_pct = max(safe_float(item.get("pct")) for item in matched)
+        amount = sum(safe_float(item.get("amount")) for item in matched)
+        net = sum(safe_float(item.get("net")) for item in matched)
+        score = best_pct + min(amount / 100_000_000_000, 2.5) + (1.0 if net > 0 else 0.0) + min(len(matched) * 0.4, 1.6)
+        if label == "PCB/PET铜箔":
+            score += 1.8
+        if label == "CPO" and not any("CPO" in item["name"] for item in matched):
+            score -= 1.2
+        scored.append({"label": label, "score": score, "names": names})
+    best_score = max((item["score"] for item in scored), default=0.0)
+    narrow_labels = {"PCB/PET铜箔"}
+    scored.sort(
+        key=lambda item: (
+            item["label"] in narrow_labels and item["score"] >= best_score - 3,
+            item["score"],
+        ),
+        reverse=True,
+    )
+    return matched_names, scored
+
+
 def pick_subtheme(names: list[str]) -> str:
     groups = [
-        ("PCB", ("PCB", "印制电路板")),
+        ("PCB/PET铜箔", ("PCB", "印制电路板", "PET铜箔", "复合集流体", "铜箔")),
         ("CPO", ("CPO", "光通信", "光纤", "铜缆")),
         ("被动元件", ("MLCC", "被动元件", "元件")),
         ("先进封装", ("先进封装", "高带宽", "集成电路")),
@@ -743,7 +765,7 @@ def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) 
         industries = []
         partial = True
     try:
-        concepts = sector_signal(eastmoney_clist(CONCEPT_FS, "f12,f14,f3,f6,f62", page_size=30))
+        concepts = sector_signal(eastmoney_clist(CONCEPT_FS, "f12,f14,f3,f6,f62", page_size=80))
     except Exception as exc:
         print(f"概念板块数据暂时不可用: {exc}", file=sys.stderr)
         concepts = []
@@ -792,8 +814,8 @@ def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) 
             "elapsed_minutes": elapsed,
             "amount_note": "盘中按已交易分钟外推预计全天成交额" if is_intraday else "收盘后正式成交额",
         },
-        "top_industries": industries[:10],
-        "top_concepts": concepts[:10],
+        "top_industries": industries[:12],
+        "top_concepts": concepts[:30],
     }
     history = [item for item in load_market_structures() if item.get("date") != trade_date]
     snapshot["mainline"] = assess_market_structure(snapshot, history)
