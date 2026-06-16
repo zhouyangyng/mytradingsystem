@@ -529,6 +529,93 @@ def sector_signal(items: list[dict]) -> list[dict]:
     return output
 
 
+def stock_signal(item: dict) -> dict:
+    return {
+        "code": str(item.get("f12") or ""),
+        "name": str(item.get("f14") or ""),
+        "pct": safe_float(item.get("f3")),
+        "price": safe_float(item.get("f2")),
+        "amount": safe_float(item.get("f6")),
+        "net": safe_float(item.get("f62")),
+    }
+
+
+def assess_core_stocks(items: list[dict]) -> list[dict]:
+    stocks = [
+        stock_signal(item)
+        for item in items
+        if isinstance(item.get("f3"), (int, float))
+        and safe_float(item.get("f6")) > 0
+        and safe_float(item.get("f2")) > 0
+    ]
+    stocks = [
+        item
+        for item in stocks
+        if item["pct"] > 0 and item["name"] and "ST" not in item["name"] and "退" not in item["name"]
+    ]
+    if not stocks:
+        return []
+
+    amount_rank = {item["code"]: rank for rank, item in enumerate(sorted(stocks, key=lambda x: x["amount"], reverse=True), 1)}
+    net_rank = {item["code"]: rank for rank, item in enumerate(sorted(stocks, key=lambda x: x["net"], reverse=True), 1)}
+    scored = []
+    for item in stocks:
+        score = 0.0
+        reasons: list[str] = []
+        pct = item["pct"]
+        amount = item["amount"]
+        net = item["net"]
+        arank = amount_rank.get(item["code"], 9999)
+        nrank = net_rank.get(item["code"], 9999)
+
+        if pct >= limit_threshold(item["code"]):
+            score += 3
+            reasons.append("强势涨停/接近涨停")
+        elif pct >= 7:
+            score += 2
+            reasons.append("涨幅主动")
+        elif pct >= 4:
+            score += 1
+            reasons.append("明显强于市场")
+        if arank <= 10:
+            score += 3
+            reasons.append("成交额全市场前10")
+        elif arank <= 30:
+            score += 2
+            reasons.append("成交额全市场前30")
+        elif amount >= 5_000_000_000:
+            score += 1
+            reasons.append("成交额有辨识度")
+        if nrank <= 10 and net > 0:
+            score += 3
+            reasons.append("主力净流入前10")
+        elif nrank <= 30 and net > 0:
+            score += 2
+            reasons.append("主力净流入前30")
+        elif net >= 500_000_000:
+            score += 1
+            reasons.append("主动资金净流入")
+        if pct >= 4 and amount >= 5_000_000_000:
+            score += 1
+            reasons.append("上涨时主动放量")
+        if pct >= 4 and amount >= 5_000_000_000 and net > 0:
+            score += 1
+            reasons.append("有带动性")
+
+        if score >= 7:
+            scored.append(
+                {
+                    **item,
+                    "score": round(score, 1),
+                    "amount_rank": arank,
+                    "net_rank": nrank,
+                    "reasons": reasons[:5],
+                }
+            )
+    scored.sort(key=lambda item: (item["score"], item["amount"], item["net"]), reverse=True)
+    return scored[:2]
+
+
 def non_emotion_sectors(items: list[dict]) -> list[dict]:
     return [
         item
@@ -753,7 +840,7 @@ def pick_subtheme(names: list[str]) -> str:
 def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) -> dict:
     partial = False
     try:
-        stocks = eastmoney_clist(ALL_A_FS, "f12,f14,f3,f6,f2", page_size=100)
+        stocks = eastmoney_clist(ALL_A_FS, "f12,f14,f3,f6,f2,f62", page_size=100)
     except Exception as exc:
         print(f"全A宽度数据暂时不可用: {exc}", file=sys.stderr)
         stocks = []
@@ -816,6 +903,7 @@ def fetch_market_structure(trade_date: str, intraday_quote: dict | None = None) 
         },
         "top_industries": industries[:12],
         "top_concepts": concepts[:30],
+        "core_stocks": assess_core_stocks(valid),
     }
     history = [item for item in load_market_structures() if item.get("date") != trade_date]
     snapshot["mainline"] = assess_market_structure(snapshot, history)
@@ -1373,6 +1461,16 @@ def print_today(rows: list[dict]) -> None:
             print(f"主线领导力: {mainline['leadership_score']}分" + (f"（{factors}）" if factors else ""))
         if mainline.get("sector_names"):
             print(f"强势方向: {' / '.join(mainline['sector_names'][:5])}")
+        core_stocks = market.get("core_stocks") or []
+        if core_stocks:
+            print("市场核心个股:")
+            for item in core_stocks[:2]:
+                reasons = " / ".join(item.get("reasons") or [])
+                print(
+                    f"- {item['name']}({item['code']}): "
+                    f"{fmt_num(item['pct'])}% 成交额{fmt_amount(item['amount'])} "
+                    f"净流入{fmt_amount(item['net'])}，{reasons}"
+                )
     else:
         print("市场结构: 暂无当日涨跌家数/主线数据")
     confirmation = row.get("confirmation") or build_confirmation(row)
@@ -1445,6 +1543,11 @@ def render_mainline_section(row: dict) -> str:
     note = mainline.get("note") or ""
     leadership_score = mainline.get("leadership_score")
     leadership_factors = " / ".join(mainline.get("leadership_factors") or [])
+    core_stocks = market.get("core_stocks") or []
+    core_stock_text = " / ".join(
+        f"{item.get('name')}({fmt_num(safe_float(item.get('pct')))}%)"
+        for item in core_stocks[:2]
+    ) or "暂无"
     return (
         '<section class="mainline">'
         '<div class="mainline-head">'
@@ -1459,6 +1562,7 @@ def render_mainline_section(row: dict) -> str:
         f'<div><b>强支线</b>{html.escape(side_text)}</div>'
         f'<div><b>领导力分</b>{html.escape(str(leadership_score if leadership_score is not None else "-"))}</div>'
         f'<div><b>依据</b>{html.escape(leadership_factors or "暂无")}</div>'
+        f'<div><b>核心个股</b>{html.escape(core_stock_text)}</div>'
         f'<div><b>判断</b>{html.escape(note)}</div>'
         f'<div><b>更新时间</b>{html.escape(str(market.get("quote_time") or "-"))}</div>'
         "</div>"
@@ -2006,6 +2110,10 @@ function updateDetail(index) {{
   const market = row.market;
   const breadth = market ? market.breadth : null;
   const mainline = market ? market.mainline : null;
+  const coreStocks = market && Array.isArray(market.core_stocks) ? market.core_stocks : [];
+  const coreStockText = coreStocks.length
+    ? coreStocks.slice(0, 2).map(item => `${{item.name}}(${{fmt(item.pct)}}%)`).join(" / ")
+    : "-";
   const amountText = breadth
     ? (market && market.is_intraday
       ? `当前 ${{fmtAmount(breadth.amount)}} / 预计全天 ${{fmtAmount(breadth.amount_projected)}}`
@@ -2032,7 +2140,8 @@ function updateDetail(index) {{
     ["全市场成交额", amountText],
     ["主线状态", mainline ? mainline.status : "-"],
     ["主线连续性", mainline ? `${{mainline.overlap_3d}}个重合方向` : "-"],
-    ["主线领导力", mainline && mainline.leadership_score !== undefined ? `${{mainline.leadership_score}}分` : "-"]
+    ["主线领导力", mainline && mainline.leadership_score !== undefined ? `${{mainline.leadership_score}}分` : "-"],
+    ["核心个股", coreStockText]
   ];
   detailGrid.innerHTML = items.map(([label, value]) =>
     `<div class="detail-item"><span>${{escapeHtml(label)}}</span><b>${{escapeHtml(value)}}</b></div>`
@@ -2048,6 +2157,12 @@ function updateDetail(index) {{
     marketNote.innerHTML =
       `<b>市场结构：</b>${{escapeHtml(mainline.note)}}<br>` +
       `<b>强势方向：</b>${{escapeHtml(sectors)}}` +
+      (coreStocks.length
+        ? `<br><b>核心个股：</b>${{coreStocks.slice(0, 2).map(item => {{
+            const reasons = Array.isArray(item.reasons) ? item.reasons.slice(0, 3).join(" / ") : "";
+            return `${{item.name}}(${{item.code}}) ${{fmt(item.pct)}}%，成交额${{fmtAmount(item.amount)}}，净流入${{fmtAmount(item.net)}}${{reasons ? "，" + reasons : ""}}`;
+          }}).map(escapeHtml).join("<br>")}}`
+        : "") +
       (market.is_intraday && breadth && breadth.amount_note
         ? `<br><b>成交额口径：</b>${{escapeHtml(breadth.amount_note)}}`
         : "");
