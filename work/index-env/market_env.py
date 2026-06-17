@@ -1682,6 +1682,9 @@ def render_html(rows: list[dict]) -> Path:
     .live-banner span {{
       font-size: 14px;
     }}
+    .live-banner.stale strong {{
+      background: #dc2626;
+    }}
     .summary {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2494,12 +2497,25 @@ function refreshWithCacheBuster() {{
   window.location.replace(url.toString());
 }}
 
+function markStaleIntradayData() {{
+  const latest = rows[rows.length - 1];
+  if (!latest || !latest.intraday || !latest.quoteTime || !isChinaTradingWindow()) return;
+  const quoteAt = new Date(String(latest.quoteTime).replace(" ", "T") + "+08:00").getTime();
+  const lagMinutes = Math.floor((Date.now() - quoteAt) / 60000);
+  if (!Number.isFinite(lagMinutes) || lagMinutes <= 15) return;
+  const banner = document.querySelector(".live-banner");
+  if (!banner) return;
+  banner.classList.add("stale");
+  banner.innerHTML = `<strong>数据滞后</strong><span>当前仍是交易时间，但页面行情已滞后约 ${{lagMinutes}} 分钟。页面会继续自动刷新；若长期不更新，说明 GitHub 自动部署或行情接口暂时不稳定。</span>`;
+}}
+
 if (isChinaTradingWindow()) {{
   setTimeout(refreshWithCacheBuster, 2 * 60 * 1000);
 }}
 window.addEventListener("resize", resize);
 updateDetail(selectedIndex);
 resize();
+markStaleIntradayData();
 </script>
 </body>
 </html>
