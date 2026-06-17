@@ -774,7 +774,10 @@ def classify_mainline(sectors: list[dict]) -> tuple[str, list[str], list[str]]:
     ai, ai_subthemes = classify_ai_hardware(sectors)
     resource = [name for name in names if any(keyword in name for keyword in resource_keywords)]
     if len(ai) >= 2:
-        subtheme_text = "+".join(item["label"] for item in ai_subthemes[:2]) if ai_subthemes else pick_subtheme(ai)
+        visible_subthemes = ai_subthemes[:2]
+        if len(ai_subthemes) >= 3 and ai_subthemes[2]["score"] >= max(ai_subthemes[0]["score"] - 4.0, 4.5):
+            visible_subthemes = ai_subthemes[:3]
+        subtheme_text = "+".join(item["label"] for item in visible_subthemes) if visible_subthemes else pick_subtheme(ai)
         return f"AI硬件 / {subtheme_text}", ai[:8], resource[:5]
     if len(resource) >= 3:
         return f"资源金属 / {pick_subtheme(resource)}", resource[:8], ai[:5]
@@ -784,9 +787,10 @@ def classify_mainline(sectors: list[dict]) -> tuple[str, list[str], list[str]]:
 def classify_ai_hardware(sectors: list[dict]) -> tuple[list[str], list[dict]]:
     subthemes = [
         ("PCB/PET铜箔", ("PCB", "印制电路板", "PET铜箔", "复合集流体", "铜箔")),
+        ("存储芯片/HBM", ("存储芯片", "高带宽内存", "HBM", "DRAM", "NAND", "存储器", "存储")),
         ("CPO", ("CPO", "光通信", "光纤", "铜缆", "通信线缆")),
         ("被动元件", ("MLCC", "被动元件", "元件")),
-        ("先进封装", ("先进封装", "高带宽", "集成电路")),
+        ("先进封装", ("先进封装", "集成电路")),
         ("激光设备", ("激光",)),
         ("半导体材料", ("电子化学品", "分立器件", "AI芯片")),
     ]
@@ -804,6 +808,8 @@ def classify_ai_hardware(sectors: list[dict]) -> tuple[list[str], list[dict]]:
         score = best_pct + min(amount / 100_000_000_000, 2.5) + (1.0 if net > 0 else 0.0) + min(len(matched) * 0.4, 1.6)
         if label == "PCB/PET铜箔":
             score += 1.8
+        if label == "存储芯片/HBM":
+            score += 1.2
         if label == "CPO" and not any("CPO" in item["name"] for item in matched):
             score -= 1.2
         scored.append({"label": label, "score": score, "names": names})
@@ -822,9 +828,10 @@ def classify_ai_hardware(sectors: list[dict]) -> tuple[list[str], list[dict]]:
 def pick_subtheme(names: list[str]) -> str:
     groups = [
         ("PCB/PET铜箔", ("PCB", "印制电路板", "PET铜箔", "复合集流体", "铜箔")),
+        ("存储芯片/HBM", ("存储芯片", "高带宽内存", "HBM", "DRAM", "NAND", "存储器", "存储")),
         ("CPO", ("CPO", "光通信", "光纤", "铜缆")),
         ("被动元件", ("MLCC", "被动元件", "元件")),
-        ("先进封装", ("先进封装", "高带宽", "集成电路")),
+        ("先进封装", ("先进封装", "集成电路")),
         ("激光设备", ("激光",)),
         ("钨钼", ("钨", "钼")),
         ("铜", ("铜",)),
