@@ -96,10 +96,46 @@ python3 work/index-env/market_env.py serve
 
 ## 远端部署
 
-推荐使用 GitHub Pages。仓库里已经包含 `.github/workflows/deploy-index-env.yml`：
+### 国内服务器部署（推荐用于盘中）
+
+如果希望交易时间稳定刷新，推荐使用国内 Linux 服务器或轻量云服务器，服务器本机定时拉行情并用 Nginx 提供页面：
+
+- 交易时段：每 2 分钟刷新一次
+- 收盘后：15:30 和 18:10 各补一次
+- 页面目录：`/var/www/mytradingsystem`
+- 更新日志：`/var/log/mytradingsystem/update.log`
+
+首次部署，在服务器上执行：
+
+```bash
+sudo REPO_URL=https://github.com/zhouyangyng/mytradingsystem.git \
+  APP_DIR=/opt/mytradingsystem \
+  WEB_DIR=/var/www/mytradingsystem \
+  bash deploy/domestic-server/install.sh
+```
+
+如果服务器还没有仓库文件，也可以先 clone：
+
+```bash
+git clone https://github.com/zhouyangyng/mytradingsystem.git /opt/mytradingsystem
+cd /opt/mytradingsystem
+sudo bash deploy/domestic-server/install.sh
+```
+
+部署完成后，手机打开：
+
+```text
+http://服务器公网IP/
+```
+
+如果绑定了已备案域名，可以把域名解析到服务器 IP，并在 Nginx 配置里把 `server_name _;` 改成域名。
+
+### GitHub Pages 部署（备用）
+
+仓库里也保留 `.github/workflows/deploy-index-env.yml`：
 
 - 手动触发：GitHub 仓库页面进入 `Actions`，选择 `Deploy Index Environment`，点 `Run workflow`
-- 自动更新：工作日北京时间 18:10 自动更新一次
+- 自动更新：工作日交易时间与收盘后自动更新
 - 发布目录：`outputs`
 
 首次使用步骤：
@@ -109,4 +145,4 @@ python3 work/index-env/market_env.py serve
 3. 进入 `Actions -> Deploy Index Environment` 手动运行一次。
 4. 运行成功后，手机打开 Pages 给出的固定网址。
 
-以后只要打开这个固定网址即可查看最新指数环境。
+GitHub Pages 是静态站，定时任务可能延迟或漏跑；盘中使用优先选择国内服务器部署。

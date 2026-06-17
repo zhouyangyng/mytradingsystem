@@ -1,0 +1,10 @@
+CRON_TZ=Asia/Shanghai
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# A股交易时段高频刷新：每 2 分钟。
+*/2 9-11,13-15 * * 1-5 root /usr/local/bin/mytradingsystem-update
+
+# 收盘后补偿刷新，确保收盘状态固化。
+30 15 * * 1-5 root /usr/local/bin/mytradingsystem-update
+10 18 * * 1-5 root /usr/local/bin/mytradingsystem-update
