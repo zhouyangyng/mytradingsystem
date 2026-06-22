@@ -1179,11 +1179,19 @@ def calculate_states(rows: list[dict]) -> list[dict]:
             state = "转"
 
         transition_limited = False
+        recent_after_bear = any(item["state"] == "空" for item in output[-3:])
+        ma_structure_repaired = None not in (ma5, ma10, ma20) and ma5 > ma10 and ma5 > ma20
+        strong_bull_confirm = score >= 75 and (volume_above_ma20 or ma_structure_repaired)
         if state == "多" and output and output[-1]["state"] == "空":
             state = "转"
             score = min(score, 69)
             transition_limited = True
             reasons.append("空头后首日修复，先按转处理，需次日确认 +0")
+        elif state == "多" and recent_after_bear and not strong_bull_confirm:
+            state = "转"
+            score = min(score, 69)
+            transition_limited = True
+            reasons.append("空头修复后多头确认不足，需量能或均线结构确认 +0")
 
         enriched = {
             **row,
@@ -1214,14 +1222,16 @@ def phase_for(states: list[dict], index: int) -> str:
     labels3 = [row["state"] for row in recent3]
     latest = states[index]["state"]
 
-    if labels5.count("多") >= 3:
+    if latest == "空":
+        return "防守"
+    if latest == "多" and labels5.count("多") >= 3:
         return "主升"
-    if labels3 == ["转", "多", "多"]:
+    if latest == "多" and labels3 == ["转", "多", "多"]:
         return "主升"
     if len(labels3) == 3 and labels3.count("转") >= 2 and latest == "多":
         return "主升"
-    if latest == "空":
-        return "防守"
+    if latest == "转" and labels5.count("多") >= 3:
+        return "主升"
     if latest == "多":
         return "试攻"
     return "观察"
@@ -1323,8 +1333,8 @@ def position_advice(row: dict) -> str:
         return "0%-20%，指数主跌/防守，不适合重仓"
     if row.get("transition_limited"):
         if has_mainline:
-            return "20%-40%，空头后首日修复，有主线也先等次日确认"
-        return "10%-30%，空头后首日修复，先观察持续性"
+            return "20%-40%，空头后修复期，有主线也先等趋势确认"
+        return "10%-30%，空头后修复期，先观察持续性"
     if row["phase"] == "主升" and has_mainline:
         return "70%-90%，指数主升且有主线，可重仓主线"
     if row["phase"] == "主升":
@@ -2093,8 +2103,8 @@ function positionAdvice(row) {{
   const hasMainline = Boolean(mainline.has_mainline);
   const emotionActive = Boolean(mainline.emotion_active);
   if (row.s === "空") return "0%-20%，指数主跌/防守，不适合重仓";
-  if (row.transitionLimited && hasMainline) return "20%-40%，空头后首日修复，有主线也先等次日确认";
-  if (row.transitionLimited) return "10%-30%，空头后首日修复，先观察持续性";
+  if (row.transitionLimited && hasMainline) return "20%-40%，空头后修复期，有主线也先等趋势确认";
+  if (row.transitionLimited) return "10%-30%，空头后修复期，先观察持续性";
   if (row.phase === "主升" && hasMainline) return "70%-90%，指数主升且有主线，可重仓主线";
   if (row.phase === "主升") return "60%-80%，指数主升但主线确认不足";
   if ((row.s === "多" || row.s === "转") && hasMainline) return "40%-60%，指数震荡/试攻，有主线可参与主线";
@@ -2134,7 +2144,7 @@ function updateDetail(index) {{
     ["状态", row.s],
     ["分数", `${{row.score}}分`],
     ["阶段", row.phase],
-    ["首日修复限制", row.transitionLimited ? "是，需次日确认" : "否"],
+    ["趋势确认限制", row.transitionLimited ? "是，需继续确认" : "否"],
     ["仓位建议", positionAdvice(row)],
     ["开盘", fmt(row.o)],
     ["最高", fmt(row.h)],
