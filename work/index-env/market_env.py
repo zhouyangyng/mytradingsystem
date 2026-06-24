@@ -1096,6 +1096,7 @@ def calculate_states(rows: list[dict]) -> list[dict]:
         reasons: list[str] = ["风险缓冲 +15"]
         hard_below_ma20 = False
         hard_heavy_drop = False
+        three_day_pct = 0.0
 
         if ma5 is not None and row["close"] > ma5:
             score += 10
@@ -1182,6 +1183,15 @@ def calculate_states(rows: list[dict]) -> list[dict]:
         recent_after_bear = any(item["state"] == "空" for item in output[-3:])
         ma_structure_repaired = None not in (ma5, ma10, ma20) and ma5 > ma10 and ma5 > ma20
         strong_bull_confirm = score >= 75 and (volume_above_ma20 or ma_structure_repaired)
+        previous_state = output[-1]["state"] if output else None
+        close_below_ma10 = ma10 is not None and row["close"] < ma10
+        severe_single_day_break = pct_change <= -2.5 and volume_above_ma5 and close_position <= 0.35
+        severe_ma_break = hard_below_ma20 and (
+            (ma5 is not None and ma10 is not None and ma5 < ma10)
+            or (pct_change <= -1.5 and volume_above_ma5)
+        )
+        severe_multi_day_break = close_below_ma10 and three_day_pct <= -4.5
+        severe_bear_confirm = severe_single_day_break or severe_ma_break or severe_multi_day_break
         if state == "多" and output and output[-1]["state"] == "空":
             state = "转"
             score = min(score, 69)
@@ -1192,6 +1202,10 @@ def calculate_states(rows: list[dict]) -> list[dict]:
             score = min(score, 69)
             transition_limited = True
             reasons.append("空头修复后多头确认不足，需量能或均线结构确认 +0")
+        elif state == "空" and previous_state == "多" and not severe_bear_confirm:
+            state = "转"
+            score = max(score, 40)
+            reasons.append("多头后首日回撤，未出现严重破位，先按转处理 +0")
 
         enriched = {
             **row,
