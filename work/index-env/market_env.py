@@ -2046,8 +2046,7 @@ def render_html(rows: list[dict]) -> Path:
         <span><i class="dot" style="background:var(--red)"></i>多</span>
         <span><i class="dot" style="background:var(--yellow)"></i>转</span>
         <span><i class="dot" style="background:var(--green)"></i>空</span>
-        <span><i class="dot" style="background:var(--blue)"></i>MA5/10</span>
-        <span><i class="dot" style="background:var(--purple)"></i>MA20</span>
+        <span><i class="dot" style="background:var(--blue)"></i>MA10</span>
       </div>
       <div id="tip">拖动查看历史，电脑双击/手机双击轻触K线查看某日评分</div>
     </div>
@@ -2166,8 +2165,7 @@ function updateDetail(index) {{
     ["收盘", fmt(row.c)],
     ["涨跌幅", `${{fmt(row.pct)}}%`],
     ["成交量", fmt(row.v, 0)],
-    ["MA5", fmt(row.ma5)],
-    ["MA20", fmt(row.ma20)],
+    ["MA10", fmt(row.ma10)],
     ["上涨比例", breadth && !market.partial ? `${{fmt(breadth.up_ratio)}}%` : "-"],
     ["涨停/跌停", breadth && !market.partial ? `${{breadth.limit_up}} / ${{breadth.limit_down}}` : "-"],
     ["大跌股", breadth && !market.partial ? breadth.big_drop : "-"],
@@ -2267,8 +2265,8 @@ function draw() {{
   const chartH = h - pad.t - pad.b;
   const start = Math.max(0, end - visible + 1);
   const slice = rows.slice(start, end + 1);
-  const max = Math.max(...slice.flatMap(r => [r.h, r.ma5 || r.h, r.ma10 || r.h, r.ma20 || r.h]));
-  const min = Math.min(...slice.flatMap(r => [r.l, r.ma5 || r.l, r.ma10 || r.l, r.ma20 || r.l]));
+  const max = Math.max(...slice.flatMap(r => [r.h, r.ma10 || r.h]));
+  const min = Math.min(...slice.flatMap(r => [r.l, r.ma10 || r.l]));
   const step = (w - pad.l - pad.r) / slice.length;
   const candleW = Math.max(2, Math.min(12, step * 0.58));
   const drawEveryLabel = step >= 7 ? 1 : Math.ceil(7 / step);
@@ -2356,9 +2354,7 @@ function draw() {{
     }}
   }});
 
-  drawLine(rows, "ma5", start, slice.length, min, max, pad.l, pad.t, w - pad.l - pad.r, chartH, "#2563eb");
-  drawLine(rows, "ma10", start, slice.length, min, max, pad.l, pad.t, w - pad.l - pad.r, chartH, "#0ea5e9");
-  drawLine(rows, "ma20", start, slice.length, min, max, pad.l, pad.t, w - pad.l - pad.r, chartH, "#7c3aed");
+  drawLine(rows, "ma10", start, slice.length, min, max, pad.l, pad.t, w - pad.l - pad.r, chartH, "#2563eb");
 
   ctx.fillStyle = "#667085";
   ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
