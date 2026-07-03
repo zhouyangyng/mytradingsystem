@@ -2048,7 +2048,7 @@ def render_html(rows: list[dict]) -> Path:
         <span><i class="dot" style="background:var(--green)"></i>空</span>
         <span><i class="dot" style="background:var(--blue)"></i>MA10</span>
       </div>
-      <div id="tip">拖动查看历史，电脑双击/手机双击轻触K线查看某日评分</div>
+      <div id="tip">拖动查看历史，单击/轻触K线查看某日评分</div>
     </div>
     <canvas id="chart" aria-label="指数K线图"></canvas>
   </section>
@@ -2096,7 +2096,6 @@ let pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartVisible = visible;
 let pointerDownPoint = null;
-let lastTap = {{time: 0, x: 0, y: 0}};
 
 function fmt(value, digits = 2) {{
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -2463,14 +2462,9 @@ canvas.addEventListener("pointerup", e => {{
   const moved = pointerDownPoint
     ? Math.hypot(e.clientX - pointerDownPoint.x, e.clientY - pointerDownPoint.y)
     : 999;
-  const now = Date.now();
-  const closeToLastTap = Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 28;
-  if (e.pointerType !== "mouse" && pointers.size === 1 && moved < 10 && now - lastTap.time < 320 && closeToLastTap) {{
+  if (pointers.size === 1 && moved < 10) {{
     e.preventDefault();
     selectByClientX(e.clientX);
-    lastTap = {{time: 0, x: 0, y: 0}};
-  }} else if (e.pointerType !== "mouse" && moved < 10) {{
-    lastTap = {{time: now, x: e.clientX, y: e.clientY}};
   }}
   pointers.delete(e.pointerId);
   dragging = false;
@@ -2487,9 +2481,6 @@ canvas.addEventListener("wheel", e => {{
   const anchor = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
   zoom(e.deltaY < 0 ? 0.82 : 1.22, anchor);
 }}, {{passive: false}});
-canvas.addEventListener("dblclick", e => {{
-  selectByClientX(e.clientX);
-}});
 document.getElementById("zoomIn").addEventListener("click", () => zoom(0.75, 0.5));
 document.getElementById("zoomOut").addEventListener("click", () => zoom(1.35, 0.5));
 document.querySelectorAll(".range button").forEach(btn => {{
