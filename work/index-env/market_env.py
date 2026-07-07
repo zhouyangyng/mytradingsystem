@@ -1184,28 +1184,22 @@ def calculate_states(rows: list[dict]) -> list[dict]:
         ma_structure_repaired = None not in (ma5, ma10, ma20) and ma5 > ma10 and ma5 > ma20
         strong_bull_confirm = score >= 75 and (volume_above_ma20 or ma_structure_repaired)
         previous_state = output[-1]["state"] if output else None
-        close_below_ma10 = ma10 is not None and row["close"] < ma10
-        severe_single_day_break = pct_change <= -2.5 and volume_above_ma5 and close_position <= 0.35
-        severe_ma_break = hard_below_ma20 and (
-            (ma5 is not None and ma10 is not None and ma5 < ma10)
-            or (pct_change <= -1.5 and volume_above_ma5)
-        )
-        severe_multi_day_break = close_below_ma10 and three_day_pct <= -4.5
-        severe_bear_confirm = severe_single_day_break or severe_ma_break or severe_multi_day_break
-        if state == "多" and output and output[-1]["state"] == "空":
+        strong_bear_reversal = ma10 is not None and row["close"] < ma10 and pct_change <= -2.5
+        strong_bull_reversal = ma10 is not None and row["close"] > ma10 and pct_change >= 2.5
+        if state == "多" and output and output[-1]["state"] == "空" and not strong_bull_reversal:
             state = "转"
             score = min(score, 69)
             transition_limited = True
             reasons.append("空头后首日修复，先按转处理，需次日确认 +0")
-        elif state == "多" and recent_after_bear and not strong_bull_confirm:
+        elif state == "多" and recent_after_bear and not strong_bull_confirm and not strong_bull_reversal:
             state = "转"
             score = min(score, 69)
             transition_limited = True
             reasons.append("空头修复后多头确认不足，需量能或均线结构确认 +0")
-        elif state == "空" and previous_state == "多" and not severe_bear_confirm:
+        elif state == "空" and previous_state == "多" and not strong_bear_reversal:
             state = "转"
             score = max(score, 40)
-            reasons.append("多头后首日回撤，未出现严重破位，先按转处理 +0")
+            reasons.append("多头后首日转弱，先按转处理，需次日确认 +0")
 
         enriched = {
             **row,
