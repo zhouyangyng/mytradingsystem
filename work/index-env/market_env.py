@@ -2132,12 +2132,12 @@ def render_html(rows: list[dict]) -> Path:
         <input id="simClose" type="number" step="0.01" inputmode="decimal" placeholder="输入点位">
       </label>
       <label class="sandbox-field">
-        <span>成交量</span>
-        <input id="simVolume" type="number" step="1" inputmode="decimal" placeholder="沿用K线量口径">
+        <span>市场成交额（亿）</span>
+        <input id="simAmount" type="number" step="1" inputmode="decimal" placeholder="如 18000">
       </label>
       <button id="simRun" type="button">推演</button>
     </div>
-    <div class="sandbox-result" id="simResult">输入假设收盘点位和成交量，点击推演查看多/转/空。</div>
+    <div class="sandbox-result" id="simResult">输入假设收盘点位和市场成交额，点击推演查看多/转/空。</div>
   </section>
   <section class="details">
     <div class="panel">
@@ -2174,7 +2174,7 @@ const confirmSummary = document.getElementById("confirmSummary");
 const confirmList = document.getElementById("confirmList");
 const simMode = document.getElementById("simMode");
 const simClose = document.getElementById("simClose");
-const simVolume = document.getElementById("simVolume");
+const simAmount = document.getElementById("simAmount");
 const simRun = document.getElementById("simRun");
 const simResult = document.getElementById("simResult");
 const ctx = canvas.getContext("2d");
@@ -2286,10 +2286,10 @@ function calculateSimStates(inputRows) {{
 
     const volumeAboveMa5 = volMa5 !== null && row.v > volMa5;
     const volumeAboveMa20 = volMa20 !== null && row.v > volMa20;
-    if (volumeAboveMa5) {{ score += 8; reasons.push("成交量高于5日均量 +8"); }}
-    if (volumeAboveMa20) {{ score += 6; reasons.push("成交量高于20日均量 +6"); }}
-    if (pctChange > 0 && volumeAboveMa5) {{ score += 6; reasons.push("上涨日放量 +6"); }}
-    if (pctChange < 0 && volumeAboveMa5) {{ score -= 8; reasons.push("下跌日放量 -8"); }}
+    if (volumeAboveMa5) {{ score += 8; reasons.push("成交额强于5日均额 +8"); }}
+    if (volumeAboveMa20) {{ score += 6; reasons.push("成交额强于20日均额 +6"); }}
+    if (pctChange > 0 && volumeAboveMa5) {{ score += 6; reasons.push("上涨日成交额放大 +6"); }}
+    if (pctChange < 0 && volumeAboveMa5) {{ score -= 8; reasons.push("下跌日成交额放大 -8"); }}
 
     if (row.h > row.o && row.c < row.o && closePosition <= 0.40 && volumeAboveMa5) {{
       score -= 10;
@@ -2363,14 +2363,32 @@ function nextScenarioDate() {{
   return "次日推演";
 }}
 
-function buildScenarioRows(mode, closeValue, volumeValue) {{
+function scenarioAmount(row) {{
+  const marketAmount = row && row.market && row.market.breadth
+    ? Number(row.market.breadth.amount_projected || row.market.breadth.amount || 0)
+    : 0;
+  return Number(row.amountProjected || row.amount || marketAmount || 0);
+}}
+
+function amountToVolumeProxy(amountYuan) {{
+  const latest = rows[rows.length - 1];
+  const latestAmount = scenarioAmount(latest);
+  const latestVolume = Number(latest && latest.v || 0);
+  if (latestAmount > 0 && latestVolume > 0) return amountYuan / latestAmount * latestVolume;
+  return latestVolume > 0 ? latestVolume : amountYuan;
+}}
+
+function buildScenarioRows(mode, closeValue, amountYuan) {{
   const base = rows.map(row => ({{...row}}));
   const latest = base[base.length - 1];
   if (!latest) return base;
+  const volumeValue = amountToVolumeProxy(amountYuan);
   if (mode === "today") {{
     const target = {{...latest}};
     target.c = closeValue;
     target.v = volumeValue;
+    target.amount = amountYuan;
+    target.amountProjected = amountYuan;
     target.h = Math.max(Number(target.h), closeValue, Number(target.o));
     target.l = Math.min(Number(target.l), closeValue, Number(target.o));
     target.d = latest.d;
@@ -2385,6 +2403,8 @@ function buildScenarioRows(mode, closeValue, volumeValue) {{
     l: Math.min(latest.c, closeValue),
     c: closeValue,
     v: volumeValue,
+    amount: amountYuan,
+    amountProjected: amountYuan,
     intraday: false,
     market: null,
     confirmation: null
@@ -2395,20 +2415,21 @@ function buildScenarioRows(mode, closeValue, volumeValue) {{
 
 function runSimulation() {{
   const closeValue = Number(simClose.value);
-  const volumeValue = Number(simVolume.value);
-  if (!Number.isFinite(closeValue) || closeValue <= 0 || !Number.isFinite(volumeValue) || volumeValue < 0) {{
-    simResult.innerHTML = "请输入有效的收盘点位和成交量。";
+  const amountYi = Number(simAmount.value);
+  if (!Number.isFinite(closeValue) || closeValue <= 0 || !Number.isFinite(amountYi) || amountYi < 0) {{
+    simResult.innerHTML = "请输入有效的收盘点位和市场成交额。";
     return;
   }}
+  const amountYuan = amountYi * 100000000;
   const mode = simMode.value;
-  const simulated = calculateSimStates(buildScenarioRows(mode, closeValue, volumeValue));
+  const simulated = calculateSimStates(buildScenarioRows(mode, closeValue, amountYuan));
   const row = simulated[simulated.length - 1];
   const stateColor = colors[row.s] || "#667085";
   const scenarioText = mode === "today" ? "当天最终收盘" : "次日收盘";
   simResult.innerHTML =
     `<div class="sim-head"><span class="sim-state" style="background:${{stateColor}}">${{escapeHtml(row.s)}}</span>` +
     `<b>${{escapeHtml(scenarioText)}}：${{row.score}}分 · ${{escapeHtml(row.phase)}}</b></div>` +
-    `<div class="sim-meta">${{escapeHtml(row.d)}} · 收盘 ${{fmt(row.c)}}，成交量 ${{fmt(row.v, 0)}}，涨跌幅 ${{fmt(row.pct)}}%，仓位建议：${{escapeHtml(positionAdvice(row))}}</div>` +
+    `<div class="sim-meta">${{escapeHtml(row.d)}} · 收盘 ${{fmt(row.c)}}，市场成交额 ${{fmtAmount(row.amountProjected || row.amount)}}，涨跌幅 ${{fmt(row.pct)}}%，仓位建议：${{escapeHtml(positionAdvice(row))}}</div>` +
     `<ul>${{String(row.reasons || "").split("；").map(item => `<li>${{escapeHtml(item)}}</li>`).join("")}}</ul>`;
 }}
 
@@ -2773,14 +2794,16 @@ document.querySelectorAll(".range button").forEach(btn => {{
   btn.addEventListener("click", () => setRange(btn.dataset.range));
 }});
 if (rows.length) {{
-  simClose.value = fmt(rows[rows.length - 1].c);
-  simVolume.value = String(Math.round(Number(rows[rows.length - 1].v || 0)));
+  const latest = rows[rows.length - 1];
+  simClose.value = fmt(latest.c);
+  const amount = scenarioAmount(latest);
+  simAmount.value = amount > 0 ? String(Math.round(amount / 100000000)) : "";
 }}
 simRun.addEventListener("click", runSimulation);
 simClose.addEventListener("keydown", e => {{
   if (e.key === "Enter") runSimulation();
 }});
-simVolume.addEventListener("keydown", e => {{
+simAmount.addEventListener("keydown", e => {{
   if (e.key === "Enter") runSimulation();
 }});
 
