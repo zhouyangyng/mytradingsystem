@@ -5,17 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # A-share opening refresh, China time 09:25-10:00, every 5 minutes.
+    # A-share trading refresh, China time 09:25-11:35, every 5 minutes.
     - cron: "25-55/5 1 * * 1-5"
-    - cron: "0 2 * * 1-5"
-    # A-share regular morning refresh, China time 10:10-11:30, every 10 minutes.
-    - cron: "10-50/10 2 * * 1-5"
-    - cron: "0-30/10 3 * * 1-5"
-    # A-share regular afternoon refresh, China time 13:00-14:30, every 10 minutes.
-    - cron: "*/10 5 * * 1-5"
-    - cron: "0-30/10 6 * * 1-5"
-    # A-share closing refresh, China time 14:30-15:10, every 5 minutes.
-    - cron: "30-55/5 6 * * 1-5"
+    - cron: "*/5 2 * * 1-5"
+    - cron: "0-35/5 3 * * 1-5"
+    # A-share trading refresh, China time 13:00-15:10, every 5 minutes.
+    - cron: "*/5 5 * * 1-5"
+    - cron: "*/5 6 * * 1-5"
     - cron: "0-10/5 7 * * 1-5"
     # Post-close compensation refreshes, China time 15:30 and 18:10.
     - cron: "30 7 * * 1-5"
