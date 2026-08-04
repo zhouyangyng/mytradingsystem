@@ -2132,8 +2132,8 @@ def render_html(rows: list[dict]) -> Path:
         <input id="simClose" type="number" step="0.01" inputmode="decimal" placeholder="输入点位">
       </label>
       <label class="sandbox-field">
-        <span>市场成交额（亿）</span>
-        <input id="simAmount" type="number" step="1" inputmode="decimal" placeholder="如 18000">
+        <span>市场成交额（万亿）</span>
+        <input id="simAmount" type="number" step="0.01" inputmode="decimal" placeholder="如 2.20">
       </label>
       <button id="simRun" type="button">推演</button>
     </div>
@@ -2415,12 +2415,12 @@ function buildScenarioRows(mode, closeValue, amountYuan) {{
 
 function runSimulation() {{
   const closeValue = Number(simClose.value);
-  const amountYi = Number(simAmount.value);
-  if (!Number.isFinite(closeValue) || closeValue <= 0 || !Number.isFinite(amountYi) || amountYi < 0) {{
+  const amountWanYi = Number(simAmount.value);
+  if (!Number.isFinite(closeValue) || closeValue <= 0 || !Number.isFinite(amountWanYi) || amountWanYi < 0) {{
     simResult.innerHTML = "请输入有效的收盘点位和市场成交额。";
     return;
   }}
-  const amountYuan = amountYi * 100000000;
+  const amountYuan = amountWanYi * 1000000000000;
   const mode = simMode.value;
   const simulated = calculateSimStates(buildScenarioRows(mode, closeValue, amountYuan));
   const row = simulated[simulated.length - 1];
@@ -2797,7 +2797,7 @@ if (rows.length) {{
   const latest = rows[rows.length - 1];
   simClose.value = fmt(latest.c);
   const amount = scenarioAmount(latest);
-  simAmount.value = amount > 0 ? String(Math.round(amount / 100000000)) : "";
+  simAmount.value = amount > 0 ? (amount / 1000000000000).toFixed(2) : "";
 }}
 simRun.addEventListener("click", runSimulation);
 simClose.addEventListener("keydown", e => {{
