@@ -1901,6 +1901,76 @@ def render_html(rows: list[dict]) -> Path:
       font-size: 15px;
       margin: 0 0 10px;
     }}
+    .sandbox {{
+      margin-top: 12px;
+    }}
+    .sandbox-form {{
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr auto;
+      gap: 8px;
+      align-items: end;
+    }}
+    .sandbox-field span {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .sandbox-field input,
+    .sandbox-field select {{
+      width: 100%;
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 9px;
+      font: inherit;
+      background: #fff;
+      color: var(--ink);
+    }}
+    .sandbox-form button {{
+      height: 38px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--blue);
+      color: #fff;
+      padding: 0 14px;
+      font: inherit;
+      font-weight: 750;
+    }}
+    .sandbox-result {{
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fbfcff;
+      padding: 10px;
+      min-height: 82px;
+      font-size: 14px;
+      line-height: 1.65;
+    }}
+    .sandbox-result .sim-head {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 6px;
+    }}
+    .sandbox-result .sim-state {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 32px;
+      height: 28px;
+      border-radius: 6px;
+      color: #fff;
+      font-weight: 850;
+    }}
+    .sandbox-result .sim-meta {{
+      color: var(--muted);
+    }}
+    .sandbox-result ul {{
+      margin: 6px 0 0;
+      padding-left: 18px;
+    }}
     .detail-grid {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1992,6 +2062,7 @@ def render_html(rows: list[dict]) -> Path:
       .range button {{ flex: 1; }}
       .zoom {{ width: 100%; }}
       .zoom button {{ flex: 1; }}
+      .sandbox-form {{ grid-template-columns: 1fr; }}
       .details {{ grid-template-columns: 1fr; }}
       .detail-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       canvas {{ height: 68vh; min-height: 460px; }}
@@ -2046,6 +2117,28 @@ def render_html(rows: list[dict]) -> Path:
     </div>
     <canvas id="chart" aria-label="指数K线图"></canvas>
   </section>
+  <section class="panel sandbox">
+    <h2>沙盘推演</h2>
+    <div class="sandbox-form">
+      <label class="sandbox-field">
+        <span>推演场景</span>
+        <select id="simMode">
+          <option value="today">当天最终收盘</option>
+          <option value="next">次日收盘</option>
+        </select>
+      </label>
+      <label class="sandbox-field">
+        <span>收盘点位</span>
+        <input id="simClose" type="number" step="0.01" inputmode="decimal" placeholder="输入点位">
+      </label>
+      <label class="sandbox-field">
+        <span>成交量</span>
+        <input id="simVolume" type="number" step="1" inputmode="decimal" placeholder="沿用K线量口径">
+      </label>
+      <button id="simRun" type="button">推演</button>
+    </div>
+    <div class="sandbox-result" id="simResult">输入假设收盘点位和成交量，点击推演查看多/转/空。</div>
+  </section>
   <section class="details">
     <div class="panel">
       <h2 id="detailTitle">今日择时评分明细</h2>
@@ -2079,6 +2172,11 @@ const detailReasons = document.getElementById("detailReasons");
 const marketNote = document.getElementById("marketNote");
 const confirmSummary = document.getElementById("confirmSummary");
 const confirmList = document.getElementById("confirmList");
+const simMode = document.getElementById("simMode");
+const simClose = document.getElementById("simClose");
+const simVolume = document.getElementById("simVolume");
+const simRun = document.getElementById("simRun");
+const simResult = document.getElementById("simResult");
 const ctx = canvas.getContext("2d");
 let end = rows.length - 1;
 let visible = Math.min(rows.length, window.innerWidth < 760 ? 80 : 120);
@@ -2118,6 +2216,200 @@ function positionAdvice(row) {{
   if (row.s === "多") return "30%-50%，指数偏强但缺少主线确认";
   if (row.s === "转") return "0%-20%，指数震荡且无主线，低仓位观察";
   return "0%-20%，不适合重仓";
+}}
+
+function movingAverage(values, endIndex, windowSize) {{
+  if (endIndex + 1 < windowSize) return null;
+  let total = 0;
+  for (let i = endIndex + 1 - windowSize; i <= endIndex; i++) total += Number(values[i] || 0);
+  return total / windowSize;
+}}
+
+function phaseForSim(states, index) {{
+  const recent5 = states.slice(Math.max(0, index - 4), index + 1);
+  const recent3 = states.slice(Math.max(0, index - 2), index + 1);
+  const labels5 = recent5.map(row => row.s);
+  const labels3 = recent3.map(row => row.s);
+  const latest = states[index].s;
+  if (latest === "空") return "防守";
+  if (latest === "多" && labels5.filter(x => x === "多").length >= 3) return "主升";
+  if (latest === "多" && labels3.join("|") === "转|多|多") return "主升";
+  if (labels3.length === 3 && labels3.filter(x => x === "转").length >= 2 && latest === "多") return "主升";
+  if (latest === "转" && labels5.filter(x => x === "多").length >= 3) return "主升";
+  if (latest === "多") return "试攻";
+  return "观察";
+}}
+
+function calculateSimStates(inputRows) {{
+  const closes = inputRows.map(row => Number(row.c));
+  const lows = inputRows.map(row => Number(row.l));
+  const volumes = inputRows.map(row => Number(row.v || 0));
+  const output = [];
+  inputRows.forEach((row, i) => {{
+    const prev = i > 0 ? inputRows[i - 1] : null;
+    const ma5 = movingAverage(closes, i, 5);
+    const ma10 = movingAverage(closes, i, 10);
+    const ma20 = movingAverage(closes, i, 20);
+    const volMa5 = movingAverage(volumes, i, 5);
+    const volMa20 = movingAverage(volumes, i, 20);
+    let score = 15;
+    const reasons = ["风险缓冲 +15"];
+    let hardBelowMa20 = false;
+    let hardHeavyDrop = false;
+    let threeDayPct = 0;
+
+    if (ma5 !== null && row.c > ma5) {{ score += 10; reasons.push("收盘价站上MA5 +10"); }}
+    if (ma10 !== null && row.c > ma10) {{ score += 10; reasons.push("收盘价站上MA10 +10"); }}
+    if (ma20 !== null && row.c > ma20) {{ score += 10; reasons.push("收盘价站上MA20 +10"); }}
+    if (ma5 !== null && ma10 !== null && ma20 !== null && ma5 > ma10 && ma10 > ma20) {{
+      score += 10;
+      reasons.push("MA5>MA10>MA20 +10");
+    }}
+    if (i >= 4 && row.c >= Math.max(...closes.slice(i - 4, i + 1))) {{
+      score += 10;
+      reasons.push("创近5日收盘新高 +10");
+    }}
+    if (i >= 2 && lows[i - 2] < lows[i - 1] && lows[i - 1] < lows[i]) {{
+      score += 5;
+      reasons.push("近3日低点抬高 +5");
+    }}
+
+    const dayRange = row.h - row.l;
+    const closePosition = dayRange <= 0 ? 0.5 : (row.c - row.l) / dayRange;
+    if (closePosition >= 0.60) {{ score += 5; reasons.push("收盘位于日内上60% +5"); }}
+
+    let pctChange = 0;
+    if (prev && prev.c) {{
+      pctChange = (row.c / prev.c - 1) * 100;
+      if (pctChange > 0) {{ score += 5; reasons.push("当日上涨 +5"); }}
+    }}
+
+    const volumeAboveMa5 = volMa5 !== null && row.v > volMa5;
+    const volumeAboveMa20 = volMa20 !== null && row.v > volMa20;
+    if (volumeAboveMa5) {{ score += 8; reasons.push("成交量高于5日均量 +8"); }}
+    if (volumeAboveMa20) {{ score += 6; reasons.push("成交量高于20日均量 +6"); }}
+    if (pctChange > 0 && volumeAboveMa5) {{ score += 6; reasons.push("上涨日放量 +6"); }}
+    if (pctChange < 0 && volumeAboveMa5) {{ score -= 8; reasons.push("下跌日放量 -8"); }}
+
+    if (row.h > row.o && row.c < row.o && closePosition <= 0.40 && volumeAboveMa5) {{
+      score -= 10;
+      reasons.push("放量冲高回落 -10");
+    }}
+    if (ma10 !== null && row.c < ma10) {{ score -= 5; reasons.push("收盘跌破MA10 -5"); }}
+    if (ma20 !== null && row.c < ma20) {{
+      score -= 10;
+      hardBelowMa20 = true;
+      reasons.push("收盘跌破MA20 -10");
+    }}
+    if (pctChange <= -1.5 && volumeAboveMa5) {{
+      score -= 10;
+      hardHeavyDrop = true;
+      reasons.push("放量大跌 -10");
+    }}
+    if (i >= 2 && inputRows[i - 2].c) {{
+      threeDayPct = (row.c / inputRows[i - 2].c - 1) * 100;
+      if (threeDayPct <= -3) {{ score -= 10; reasons.push("近3日累计跌幅<=-3% -10"); }}
+    }}
+
+    score = Math.max(0, Math.min(100, score));
+    let state = "转";
+    if (score < 40 || (hardBelowMa20 && ma5 !== null && ma10 !== null && ma5 < ma10)) {{
+      state = "空";
+    }} else if (score >= 70 && !hardBelowMa20 && !hardHeavyDrop) {{
+      state = "多";
+    }}
+
+    let transitionLimited = false;
+    const recentAfterBear = output.slice(-3).some(item => item.s === "空");
+    const maStructureRepaired = ma5 !== null && ma10 !== null && ma20 !== null && ma5 > ma10 && ma5 > ma20;
+    const strongBullConfirm = score >= 75 && (volumeAboveMa20 || maStructureRepaired);
+    const previousState = output.length ? output[output.length - 1].s : null;
+    const strongBearReversal = ma10 !== null && row.c < ma10 && pctChange <= -2.5;
+    const strongBullReversal = ma10 !== null && row.c > ma10 && pctChange >= 2.5;
+    if (state === "多" && previousState === "空" && !strongBullReversal) {{
+      state = "转";
+      score = Math.min(score, 69);
+      transitionLimited = true;
+      reasons.push("空头后首日修复，先按转处理，需次日确认 +0");
+    }} else if (state === "多" && recentAfterBear && !strongBullConfirm && !strongBullReversal) {{
+      state = "转";
+      score = Math.min(score, 69);
+      transitionLimited = true;
+      reasons.push("空头修复后多头确认不足，需量能或均线结构确认 +0");
+    }} else if (state === "空" && previousState === "多" && !strongBearReversal) {{
+      state = "转";
+      score = Math.max(score, 40);
+      reasons.push("多头后首日转弱，先按转处理，需次日确认 +0");
+    }}
+
+    output.push({{
+      ...row,
+      ma5,
+      ma10,
+      ma20,
+      pct: pctChange,
+      score: Math.round(score),
+      s: state,
+      transitionLimited,
+      phase: "",
+      reasons: reasons.join("；")
+    }});
+  }});
+  output.forEach((row, index) => {{ row.phase = phaseForSim(output, index); }});
+  return output;
+}}
+
+function nextScenarioDate() {{
+  return "次日推演";
+}}
+
+function buildScenarioRows(mode, closeValue, volumeValue) {{
+  const base = rows.map(row => ({{...row}}));
+  const latest = base[base.length - 1];
+  if (!latest) return base;
+  if (mode === "today") {{
+    const target = {{...latest}};
+    target.c = closeValue;
+    target.v = volumeValue;
+    target.h = Math.max(Number(target.h), closeValue, Number(target.o));
+    target.l = Math.min(Number(target.l), closeValue, Number(target.o));
+    target.d = latest.d;
+    target.intraday = false;
+    base[base.length - 1] = target;
+    return base;
+  }}
+  const next = {{
+    d: nextScenarioDate(),
+    o: latest.c,
+    h: Math.max(latest.c, closeValue),
+    l: Math.min(latest.c, closeValue),
+    c: closeValue,
+    v: volumeValue,
+    intraday: false,
+    market: null,
+    confirmation: null
+  }};
+  base.push(next);
+  return base;
+}}
+
+function runSimulation() {{
+  const closeValue = Number(simClose.value);
+  const volumeValue = Number(simVolume.value);
+  if (!Number.isFinite(closeValue) || closeValue <= 0 || !Number.isFinite(volumeValue) || volumeValue < 0) {{
+    simResult.innerHTML = "请输入有效的收盘点位和成交量。";
+    return;
+  }}
+  const mode = simMode.value;
+  const simulated = calculateSimStates(buildScenarioRows(mode, closeValue, volumeValue));
+  const row = simulated[simulated.length - 1];
+  const stateColor = colors[row.s] || "#667085";
+  const scenarioText = mode === "today" ? "当天最终收盘" : "次日收盘";
+  simResult.innerHTML =
+    `<div class="sim-head"><span class="sim-state" style="background:${{stateColor}}">${{escapeHtml(row.s)}}</span>` +
+    `<b>${{escapeHtml(scenarioText)}}：${{row.score}}分 · ${{escapeHtml(row.phase)}}</b></div>` +
+    `<div class="sim-meta">${{escapeHtml(row.d)}} · 收盘 ${{fmt(row.c)}}，成交量 ${{fmt(row.v, 0)}}，涨跌幅 ${{fmt(row.pct)}}%，仓位建议：${{escapeHtml(positionAdvice(row))}}</div>` +
+    `<ul>${{String(row.reasons || "").split("；").map(item => `<li>${{escapeHtml(item)}}</li>`).join("")}}</ul>`;
 }}
 
 function escapeHtml(value) {{
@@ -2479,6 +2771,17 @@ document.getElementById("zoomIn").addEventListener("click", () => zoom(0.75, 0.5
 document.getElementById("zoomOut").addEventListener("click", () => zoom(1.35, 0.5));
 document.querySelectorAll(".range button").forEach(btn => {{
   btn.addEventListener("click", () => setRange(btn.dataset.range));
+}});
+if (rows.length) {{
+  simClose.value = fmt(rows[rows.length - 1].c);
+  simVolume.value = String(Math.round(Number(rows[rows.length - 1].v || 0)));
+}}
+simRun.addEventListener("click", runSimulation);
+simClose.addEventListener("keydown", e => {{
+  if (e.key === "Enter") runSimulation();
+}});
+simVolume.addEventListener("keydown", e => {{
+  if (e.key === "Enter") runSimulation();
 }});
 
 function chinaTimeParts() {{
